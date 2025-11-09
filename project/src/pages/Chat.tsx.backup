@@ -1,0 +1,1158 @@
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+import { AuthService } from '../lib/authService';
+import { ArrowLeft, Send, Menu, LogOut, User, MessageCircle, X, Settings, Users, Wallet, Compass } from 'lucide-react';
+import Lounge from '../components/Lounge';
+
+interface Message {
+  id: string;
+  content: string;
+  sender_id: string;
+  created_at: string;
+  conversation_id: string;
+  sender?: {
+    username: string;
+    profile_picture_url?: string;
+  };
+}
+
+interface Conversation {
+  id: string;
+  name: string | null;
+  is_group: boolean;
+  updated_at: string;
+  last_message?: Message;
+  other_user?: {
+    username: string;
+    is_online: boolean;
+    profile_picture_url?: string;
+  };
+}
+
+interface Profile {
+  id: string;
+  username: string;
+  is_online: boolean;
+  profile_picture_url?: string;
+}
+
+export default function Chat() {
+  const navigate = useNavigate();
+  const [user, setUser] = useState<any>(null);
+  const [profile, setProfile] = useState<any>(null);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [newMessage, setNewMessage] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [showSearch, setShowSearch] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Profile[]>([]);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsUsername, setSettingsUsername] = useState('');
+  const [settingsProfilePicture, setSettingsProfilePicture] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string>('');
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
+  const [settingsSuccess, setSettingsSuccess] = useState('');
+  const [isMobile, setIsMobile] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [isUserAtBottom, setIsUserAtBottom] = useState(true);
+  const [updatedConversationId, setUpdatedConversationId] = useState<string | null>(null);
+  const [activeNavTab, setActiveNavTab] = useState('chat');
+  const [pendingDmUserId, setPendingDmUserId] = useState<string | null>(null);
+  const [pendingDmUserProfile, setPendingDmUserProfile] = useState<Profile | null>(null);
+
+  useEffect(() => {
+    checkAuth();
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (user?.id) {
+      loadConversations(user.id);
+      setupRealtimeSubscriptions();
+
+      // Poll for updates every 3 seconds as a backup to realtime
+      const pollInterval = setInterval(() => {
+        loadConversations(user.id);
+      }, 3000);
+
+      return () => clearInterval(pollInterval);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (selectedConversation) {
+      loadMessages();
+      setIsUserAtBottom(true);
+    }
+  }, [selectedConversation]);
+
+  useEffect(() => {
+    if (isUserAtBottom) {
+      scrollToBottom();
+    }
+  }, [messages, isUserAtBottom]);
+
+  useEffect(() => {
+    if (searchQuery.trim()) {
+      searchUsers();
+    } else {
+      setSearchResults([]);
+    }
+  }, [searchQuery]);
+
+  const checkIfUserAtBottom = () => {
+    if (!messagesContainerRef.current) return true;
+
+    const container = messagesContainerRef.current;
+    const threshold = 100;
+    const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+    setIsUserAtBottom(isAtBottom);
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const checkAuth = async () => {
+    if (!AuthService.isAuthenticated()) {
+      navigate('/dapp/auth');
+      return;
+    }
+
+    const currentUser = await AuthService.getCurrentUser();
+
+    if (!currentUser || !currentUser.success) {
+      navigate('/dapp/auth');
+      return;
+    }
+
+    setUser({ id: currentUser.userId });
+
+    const { data: profileData } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', currentUser.userId)
+      .maybeSingle();
+
+    if (!profileData?.username) {
+      navigate('/dapp/username');
+      return;
+    }
+
+    setProfile(profileData);
+    setLoading(false);
+  };
+
+  const loadConversations = async (userId: string) => {
+    const { data: participantData } = await supabase
+      .from('conversation_participants')
+      .select('conversation_id, conversations(*)')
+      .eq('user_id', userId);
+
+    if (participantData) {
+      const conversationsWithDetails = await Promise.all(
+        participantData.map(async (item: any) => {
+          const conv = item.conversations;
+
+          const { data: lastMsg } = await supabase
+            .from('messages')
+            .select('*, sender:profiles(username)')
+            .eq('conversation_id', conv.id)
+            .eq('is_deleted', false)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          const { data: otherParticipants } = await supabase
+            .from('conversation_participants')
+            .select('user_id, profiles(username, is_online, profile_picture_url)')
+            .eq('conversation_id', conv.id)
+            .neq('user_id', userId);
+
+          return {
+            ...conv,
+            last_message: lastMsg,
+            other_user: otherParticipants?.[0]?.profiles || null,
+          };
+        })
+      );
+
+      conversationsWithDetails.sort((a, b) => {
+        const aTime = a.last_message?.created_at || a.updated_at;
+        const bTime = b.last_message?.created_at || b.updated_at;
+        return new Date(bTime).getTime() - new Date(aTime).getTime();
+      });
+
+      setConversations(prev => {
+        // Check if data actually changed to prevent unnecessary re-renders
+        const hasChanged = JSON.stringify(prev.map(c => ({
+          id: c.id,
+          lastMsgId: c.last_message?.id,
+          lastMsgContent: c.last_message?.content,
+          lastMsgTime: c.last_message?.created_at
+        }))) !== JSON.stringify(conversationsWithDetails.map(c => ({
+          id: c.id,
+          lastMsgId: c.last_message?.id,
+          lastMsgContent: c.last_message?.content,
+          lastMsgTime: c.last_message?.created_at
+        })));
+
+        return hasChanged ? conversationsWithDetails : prev;
+      });
+    }
+  };
+
+  const loadMessages = async () => {
+    if (!selectedConversation) return;
+
+    const { data } = await supabase
+      .from('messages')
+      .select('*, sender:profiles(username, profile_picture_url)')
+      .eq('conversation_id', selectedConversation)
+      .eq('is_deleted', false)
+      .order('created_at', { ascending: true });
+
+    if (data) {
+      setMessages(data);
+    }
+  };
+
+  const updateConversationWithMessage = (conversationId: string, message: Message) => {
+    setConversations(prev => {
+      const convIndex = prev.findIndex(c => c.id === conversationId);
+      if (convIndex === -1) return prev;
+
+      const updatedConv: Conversation = {
+        ...prev[convIndex],
+        last_message: {
+          id: message.id,
+          content: message.content,
+          sender_id: message.sender_id,
+          created_at: message.created_at,
+          conversation_id: message.conversation_id,
+          sender: message.sender,
+        },
+        updated_at: message.created_at,
+      };
+
+      const newConversations = prev.filter((_, i) => i !== convIndex);
+      newConversations.unshift(updatedConv);
+
+      return newConversations;
+    });
+
+    if (conversationId !== selectedConversation) {
+      setUpdatedConversationId(conversationId);
+      setTimeout(() => setUpdatedConversationId(null), 1000);
+    }
+  };
+
+  const setupRealtimeSubscriptions = () => {
+    const messagesChannel = supabase
+      .channel('public:messages')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+        },
+        async (payload) => {
+          const newMsg = payload.new as Message;
+
+          const { data: senderData } = await supabase
+            .from('profiles')
+            .select('username, profile_picture_url')
+            .eq('id', newMsg.sender_id)
+            .maybeSingle();
+
+          const messageWithSender = { ...newMsg, sender: senderData };
+
+          if (newMsg.conversation_id === selectedConversation && newMsg.sender_id !== user?.id) {
+            setMessages(prev => {
+              const exists = prev.some(m => m.id === newMsg.id);
+              if (exists) return prev;
+              return [...prev, messageWithSender];
+            });
+          }
+
+          updateConversationWithMessage(newMsg.conversation_id, messageWithSender);
+        }
+      )
+      .subscribe();
+
+    const conversationsChannel = supabase
+      .channel('public:conversations')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'conversations',
+        },
+        () => {
+          if (user?.id) {
+            loadConversations(user.id);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(messagesChannel);
+      supabase.removeChannel(conversationsChannel);
+    };
+  };
+
+  const searchUsers = async () => {
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, username, is_online, profile_picture_url')
+      .ilike('username', `%${searchQuery}%`)
+      .neq('id', user?.id)
+      .limit(10);
+
+    if (data) {
+      setSearchResults(data);
+    }
+  };
+
+  const startConversation = async (otherUserId: string) => {
+    const { data: existingConv } = await supabase
+      .from('conversation_participants')
+      .select('conversation_id, conversations!inner(*)')
+      .eq('user_id', user.id);
+
+    if (existingConv) {
+      for (const conv of existingConv) {
+        const { data: participants } = await supabase
+          .from('conversation_participants')
+          .select('user_id')
+          .eq('conversation_id', conv.conversation_id);
+
+        if (
+          participants?.length === 2 &&
+          participants.some(p => p.user_id === otherUserId)
+        ) {
+          setSelectedConversation(conv.conversation_id);
+          setSearchQuery('');
+          setActiveNavTab('chat');
+          setPendingDmUserId(null);
+          setPendingDmUserProfile(null);
+          return;
+        }
+      }
+    }
+
+    const { data: otherUserProfile } = await supabase
+      .from('profiles')
+      .select('id, username, is_online, profile_picture_url')
+      .eq('id', otherUserId)
+      .maybeSingle();
+
+    if (otherUserProfile) {
+      setPendingDmUserId(otherUserId);
+      setPendingDmUserProfile(otherUserProfile);
+      setSelectedConversation(null);
+      setMessages([]);
+      setSearchQuery('');
+      setActiveNavTab('chat');
+    }
+  };
+
+  const sendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!newMessage.trim() || !user) return;
+    if (!selectedConversation && !pendingDmUserId) return;
+
+    const messageContent = newMessage.trim();
+    setNewMessage('');
+
+    let conversationId = selectedConversation;
+
+    if (pendingDmUserId && !selectedConversation) {
+      const { data: newConv, error: convError } = await supabase
+        .from('conversations')
+        .insert({ is_group: false })
+        .select()
+        .single();
+
+      if (convError || !newConv) {
+        setNewMessage(messageContent);
+        return;
+      }
+
+      await supabase.from('conversation_participants').insert([
+        { conversation_id: newConv.id, user_id: user.id },
+        { conversation_id: newConv.id, user_id: pendingDmUserId },
+      ]);
+
+      conversationId = newConv.id;
+      setSelectedConversation(newConv.id);
+      setPendingDmUserId(null);
+      setPendingDmUserProfile(null);
+      loadConversations(user.id);
+    }
+
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: conversationId,
+        sender_id: user.id,
+        content: messageContent,
+      })
+      .select('*, sender:profiles(username)')
+      .single();
+
+    if (!error && data) {
+      setMessages(prev => [...prev, data]);
+      if (conversationId) {
+        updateConversationWithMessage(conversationId, data);
+      }
+      setIsUserAtBottom(true);
+      setTimeout(() => scrollToBottom(), 50);
+    } else {
+      setNewMessage(messageContent);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await AuthService.signOut();
+    navigate('/');
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+      setSettingsError('Please select a valid image file (JPG, PNG, GIF, or WebP)');
+      return;
+    }
+
+    // Validate file size (5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      setSettingsError('Image size must be less than 5MB');
+      return;
+    }
+
+    setSelectedFile(file);
+    setSettingsError('');
+
+    // Create preview URL
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setPreviewUrl(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleOpenSettings = () => {
+    setSettingsUsername(profile?.username || '');
+    setSettingsProfilePicture(profile?.profile_picture_url || '');
+    setPreviewUrl(profile?.profile_picture_url || '');
+    setSelectedFile(null);
+    setSettingsError('');
+    setSettingsSuccess('');
+    setShowSettings(true);
+    setShowMenu(false);
+  };
+
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSettingsError('');
+    setSettingsSuccess('');
+
+    if (settingsUsername.length < 3) {
+      setSettingsError('Username must be at least 3 characters');
+      return;
+    }
+
+    if (settingsUsername.length > 20) {
+      setSettingsError('Username must be less than 20 characters');
+      return;
+    }
+
+    if (!/^[a-zA-Z0-9_]+$/.test(settingsUsername)) {
+      setSettingsError('Username can only contain letters, numbers, and underscores');
+      return;
+    }
+
+    setSettingsSaving(true);
+
+    try {
+      let profilePictureUrl = settingsProfilePicture;
+
+      // Handle file upload if a new file is selected
+      if (selectedFile && user?.id) {
+        // Delete old profile picture if it exists
+        if (profile?.profile_picture_url) {
+          const oldPath = profile.profile_picture_url.split('/').pop();
+          if (oldPath) {
+            await supabase.storage
+              .from('profile-pictures')
+              .remove([`${user.id}/${oldPath}`]);
+          }
+        }
+
+        // Upload new profile picture
+        const fileExt = selectedFile.name.split('.').pop();
+        const fileName = `${Date.now()}.${fileExt}`;
+        const filePath = `${user.id}/${fileName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('profile-pictures')
+          .upload(filePath, selectedFile, {
+            cacheControl: '3600',
+            upsert: false,
+          });
+
+        if (uploadError) throw uploadError;
+
+        // Get public URL
+        const { data: { publicUrl } } = supabase.storage
+          .from('profile-pictures')
+          .getPublicUrl(filePath);
+
+        profilePictureUrl = publicUrl;
+      }
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({
+          username: settingsUsername,
+          profile_picture_url: profilePictureUrl || null,
+        })
+        .eq('id', profile.id);
+
+      if (updateError) throw updateError;
+
+      setProfile({
+        ...profile,
+        username: settingsUsername,
+        profile_picture_url: profilePictureUrl || null,
+      });
+
+      setSettingsSuccess('Profile updated successfully!');
+      setTimeout(() => {
+        setShowSettings(false);
+        setSelectedFile(null);
+      }, 1500);
+    } catch (err: any) {
+      setSettingsError(err.message || 'Failed to update profile');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const formatTime = (timestamp: string) => {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffInHours = (now.getTime() - date.getTime()) / (1000 * 60 * 60);
+
+    if (diffInHours < 24) {
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    }
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-[#17ff9a] border-t-transparent rounded-full animate-spin" />
+          <p className="text-gray-400">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  const currentConv = conversations.find(c => c.id === selectedConversation);
+  const chatName = currentConv?.other_user?.username || 'Chat';
+  const isOnline = currentConv?.other_user?.is_online || false;
+
+  return (
+    <div className="h-screen bg-[#0a0a0a] flex overflow-hidden">
+      <div
+        className={`
+          ${isMobile && (selectedConversation || pendingDmUserId || activeNavTab !== 'chat') ? 'hidden' : 'flex'}
+          flex-col w-full md:w-80 lg:w-96 border-r border-[#1a1a1a] bg-[#0f0f0f]
+        `}
+      >
+        <div className="flex-shrink-0 bg-gradient-to-r from-[#111] to-[#0a0a0a] border-b border-[#1a1a1a] p-4 backdrop-blur-xl">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center shadow-lg shadow-[#17ff9a]/20">
+                <span className="text-black font-bold text-lg">Z</span>
+              </div>
+              <h1 className="text-xl font-bold text-white">Messages</h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowMenu(!showMenu)}
+                className={`
+                  w-10 h-10 rounded-xl flex items-center justify-center
+                  transition-all duration-200 active:scale-95
+                  ${showMenu
+                    ? 'bg-gradient-to-br from-[#17ff9a] to-[#10b981] text-black shadow-lg shadow-[#17ff9a]/20'
+                    : 'bg-[#1a1a1a] text-gray-400 hover:text-[#17ff9a] hover:bg-[#1f1f1f]'
+                  }
+                `}
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+
+          {showSearch && (
+            <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
+              <div className="relative">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search users..."
+                  className="w-full px-4 py-3 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-white text-sm placeholder-gray-500 focus:outline-none focus:border-[#17ff9a] focus:ring-2 focus:ring-[#17ff9a]/20 transition-all"
+                  autoFocus
+                />
+              </div>
+
+              {searchResults.length > 0 && (
+                <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl overflow-hidden shadow-xl">
+                  {searchResults.map((result) => (
+                    <button
+                      key={result.id}
+                      onClick={() => startConversation(result.id)}
+                      className="w-full flex items-center gap-3 p-3 hover:bg-[#252525] transition-all group"
+                    >
+                      <div className="relative">
+                        {result.profile_picture_url ? (
+                          <img
+                            src={result.profile_picture_url}
+                            alt={result.username}
+                            className="w-11 h-11 rounded-full object-cover border-2 border-[#2a2a2a]"
+                          />
+                        ) : (
+                          <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center shadow-lg shadow-[#17ff9a]/10 group-hover:shadow-[#17ff9a]/30 transition-all">
+                            <span className="text-black font-bold">
+                              {result.username.charAt(0).toUpperCase()}
+                            </span>
+                          </div>
+                        )}
+                        {result.is_online && (
+                          <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-[#17ff9a] border-2 border-[#1a1a1a] rounded-full" />
+                        )}
+                      </div>
+                      <div className="flex-1 text-left">
+                        <p className="text-white font-medium text-sm">{result.username}</p>
+                        <p className="text-xs text-gray-500">
+                          {result.is_online ? 'Online' : 'Offline'}
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {showMenu && (
+            <div className="mt-3 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl overflow-hidden shadow-xl animate-in fade-in slide-in-from-top-2 duration-200">
+              <div className="p-4 border-b border-[#2a2a2a]">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    {profile?.profile_picture_url ? (
+                      <img
+                        src={profile.profile_picture_url}
+                        alt={profile.username}
+                        className="w-12 h-12 rounded-full object-cover border-2 border-[#2a2a2a]"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center shadow-lg shadow-[#17ff9a]/20">
+                        <span className="text-black font-bold text-lg">
+                          {profile?.username?.charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
+                    <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-[#17ff9a] border-2 border-[#1a1a1a] rounded-full" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-white font-semibold">{profile?.username}</p>
+                    <p className="text-xs text-gray-500 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 bg-[#17ff9a] rounded-full" />
+                      Online
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={handleOpenSettings}
+                className="w-full flex items-center gap-3 p-4 text-gray-300 hover:bg-[#252525] hover:text-[#17ff9a] transition-all group border-b border-[#2a2a2a]"
+              >
+                <Settings className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                <span className="font-medium">Profile Settings</span>
+              </button>
+              <button
+                onClick={handleSignOut}
+                className="w-full flex items-center gap-3 p-4 text-red-400 hover:bg-[#252525] transition-all group"
+              >
+                <LogOut className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                <span className="font-medium">Sign Out</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {conversations.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+              <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-[#17ff9a]/10 to-[#10b981]/10 border border-[#17ff9a]/20 flex items-center justify-center mb-4 shadow-lg shadow-[#17ff9a]/5">
+                <MessageCircle className="w-10 h-10 text-[#17ff9a]" />
+              </div>
+              <h3 className="text-lg font-bold text-white mb-2">No Conversations</h3>
+              <p className="text-sm text-gray-400 mb-6 max-w-xs">
+                Search for users to start chatting securely with zero-knowledge authentication
+              </p>
+              <button
+                onClick={() => setShowSearch(true)}
+                className="px-6 py-3 bg-gradient-to-r from-[#17ff9a] to-[#10b981] text-black font-semibold rounded-xl hover:shadow-xl hover:shadow-[#17ff9a]/20 transition-all active:scale-95"
+              >
+                Start Chatting
+              </button>
+            </div>
+          ) : (
+            <div className="divide-y divide-[#1a1a1a]">
+              {conversations.map((conv, index) => (
+                <button
+                  key={`${conv.id}-${conv.last_message?.id || 'no-msg'}`}
+                  onClick={() => setSelectedConversation(conv.id)}
+                  className={`
+                    w-full flex items-center gap-3 p-4 transition-all duration-200 ease-in-out group
+                    ${selectedConversation === conv.id
+                      ? 'bg-[#1a1a1a] border-l-4 border-[#17ff9a]'
+                      : updatedConversationId === conv.id
+                      ? 'bg-[#17ff9a]/5 border-l-4 border-[#17ff9a]/50'
+                      : 'hover:bg-[#151515] border-l-4 border-transparent'
+                    }
+                  `}
+                  style={{
+                    animation: `fadeInSlide 0.3s ease-out ${index * 0.05}s both`
+                  }}
+                >
+                  <div className="relative flex-shrink-0">
+                    {conv.other_user?.profile_picture_url ? (
+                      <img
+                        src={conv.other_user.profile_picture_url}
+                        alt={conv.other_user.username}
+                        className="w-12 h-12 rounded-full object-cover border-2 border-[#2a2a2a]"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center shadow-lg shadow-[#17ff9a]/10 group-hover:shadow-[#17ff9a]/30 transition-all duration-300">
+                        <span className="text-black font-bold">
+                          {(conv.other_user?.username || 'C').charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
+                    {conv.other_user?.is_online && (
+                      <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-[#17ff9a] border-2 border-[#0f0f0f] rounded-full animate-pulse" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-white font-semibold text-sm truncate">
+                        {conv.other_user?.username || 'Chat'}
+                      </p>
+                      {conv.last_message && (
+                        <span className="text-xs text-gray-500 ml-2 flex-shrink-0 transition-all duration-300">
+                          {formatTime(conv.last_message.created_at)}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-400 truncate transition-all duration-300">
+                      {conv.last_message?.content || 'No messages yet'}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div
+        className={`
+          ${isMobile && !selectedConversation && !pendingDmUserId && activeNavTab === 'chat' ? 'hidden' : 'flex'}
+          flex-col flex-1 bg-[#0a0a0a] pb-20
+        `}
+      >
+        {selectedConversation || pendingDmUserId ? (
+          <>
+          <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+            <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-[#17ff9a]/10 to-[#10b981]/10 border border-[#17ff9a]/20 flex items-center justify-center mb-6 shadow-xl shadow-[#17ff9a]/10">
+              <Wallet className="w-12 h-12 text-[#17ff9a]" />
+            </div>
+            <h3 className="text-2xl font-bold text-white mb-3">Wallet</h3>
+            <p className="text-sm text-gray-400 max-w-md">
+              Coming soon - Manage your crypto wallet
+            </p>
+          </div>
+        ) : activeNavTab === 'explorer' ? (
+          <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+            <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-[#17ff9a]/10 to-[#10b981]/10 border border-[#17ff9a]/20 flex items-center justify-center mb-6 shadow-xl shadow-[#17ff9a]/10">
+              <Compass className="w-12 h-12 text-[#17ff9a]" />
+            </div>
+            <h3 className="text-2xl font-bold text-white mb-3">Explorer</h3>
+            <p className="text-sm text-gray-400 max-w-md">
+              Coming soon - Explore the blockchain
+            </p>
+          </div>
+        ) : selectedConversation || pendingDmUserId ? (
+          <>
+            <div className="flex-shrink-0 bg-gradient-to-r from-[#111] to-[#0a0a0a] border-b border-[#1a1a1a] px-4 py-3 backdrop-blur-xl">
+              <div className="flex items-center gap-3">
+                {isMobile && (
+                  <button
+                    onClick={() => {
+                      setSelectedConversation(null);
+                      setPendingDmUserId(null);
+                      setPendingDmUserProfile(null);
+                    }}
+                    className="w-10 h-10 rounded-xl bg-[#1a1a1a] flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#1f1f1f] transition-all active:scale-95"
+                  >
+                    <ArrowLeft className="w-5 h-5" />
+                  </button>
+                )}
+                <div className="relative">
+                  {(pendingDmUserProfile?.profile_picture_url || currentConv?.other_user?.profile_picture_url) ? (
+                    <img
+                      src={pendingDmUserProfile?.profile_picture_url || currentConv?.other_user?.profile_picture_url}
+                      alt={pendingDmUserProfile?.username || chatName}
+                      className="w-10 h-10 rounded-full object-cover border-2 border-[#2a2a2a]"
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center shadow-lg shadow-[#17ff9a]/20">
+                      <span className="text-black font-bold text-sm">
+                        {(pendingDmUserProfile?.username || chatName).charAt(0).toUpperCase()}
+                      </span>
+                    </div>
+                  )}
+                  {(pendingDmUserProfile?.is_online || isOnline) && (
+                    <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#17ff9a] border-2 border-[#111] rounded-full" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-white font-semibold truncate">{pendingDmUserProfile?.username || chatName}</h2>
+                  <p className="text-xs text-gray-500 flex items-center gap-1.5">
+                    {(pendingDmUserProfile?.is_online || isOnline) && <span className="w-1.5 h-1.5 bg-[#17ff9a] rounded-full" />}
+                    {(pendingDmUserProfile?.is_online || isOnline) ? 'Online' : 'Offline'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div
+              ref={messagesContainerRef}
+              onScroll={checkIfUserAtBottom}
+              className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4"
+            >
+              {pendingDmUserId && messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-center">
+                  <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-[#17ff9a]/10 to-[#10b981]/10 border border-[#17ff9a]/20 flex items-center justify-center mb-4 shadow-lg shadow-[#17ff9a]/5">
+                    <MessageCircle className="w-10 h-10 text-[#17ff9a]" />
+                  </div>
+                  <h3 className="text-lg font-bold text-white mb-2">Start a conversation</h3>
+                  <p className="text-sm text-gray-400 max-w-xs">
+                    Send a message to {pendingDmUserProfile?.username} to start chatting
+                  </p>
+                </div>
+              ) : (
+                messages.map((message, index) => {
+                const isOwnMessage = message.sender_id === user?.id;
+                const showAvatar = index === 0 || messages[index - 1].sender_id !== message.sender_id;
+
+                return (
+                  <div
+                    key={message.id}
+                    className={`flex gap-2 ${isOwnMessage ? 'justify-end' : 'justify-start'} opacity-0 animate-[fadeIn_0.3s_ease-in-out_forwards]`}
+                    style={{ animationDelay: '0ms' }}
+                  >
+                    {!isOwnMessage && (
+                      <div className="flex-shrink-0">
+                        {showAvatar ? (
+                          message.sender?.profile_picture_url ? (
+                            <img
+                              src={message.sender.profile_picture_url}
+                              alt={message.sender.username}
+                              className="w-8 h-8 rounded-full object-cover border border-[#2a2a2a]"
+                            />
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center shadow-md">
+                              <span className="text-black font-bold text-xs">
+                                {(message.sender?.username || 'U').charAt(0).toUpperCase()}
+                              </span>
+                            </div>
+                          )
+                        ) : (
+                          <div className="w-8 h-8" />
+                        )}
+                      </div>
+                    )}
+                    <div className={`flex flex-col ${isOwnMessage ? 'items-end' : 'items-start'} max-w-[85%] md:max-w-[70%]`}>
+                      {showAvatar && !isOwnMessage && (
+                        <span className="text-xs text-gray-500 font-medium mb-1 ml-1">
+                          {message.sender?.username}
+                        </span>
+                      )}
+                      <div
+                        className={`
+                          rounded-2xl px-4 py-2.5 shadow-lg
+                          ${isOwnMessage
+                            ? 'bg-gradient-to-br from-[#17ff9a] to-[#10b981] text-black shadow-[#17ff9a]/20 rounded-br-md'
+                            : 'bg-[#1a1a1a] border border-[#2a2a2a] text-white rounded-bl-md'
+                          }
+                        `}
+                      >
+                        <p className="text-sm break-words whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                        <p
+                          className={`text-xs mt-1.5 ${
+                            isOwnMessage ? 'text-black/60' : 'text-gray-500'
+                          }`}
+                        >
+                          {formatTime(message.created_at)}
+                        </p>
+                      </div>
+                    </div>
+                    {isOwnMessage && <div className="w-8 flex-shrink-0" />}
+                  </div>
+                );
+              })
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="flex-shrink-0 bg-gradient-to-r from-[#111] to-[#0a0a0a] border-t border-[#1a1a1a] p-4 backdrop-blur-xl">
+              <form onSubmit={sendMessage} className="flex gap-3">
+                <input
+                  type="text"
+                  value={newMessage}
+                  onChange={(e) => setNewMessage(e.target.value)}
+                  placeholder="Type a message..."
+                  className="flex-1 px-4 py-3 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-white text-sm placeholder-gray-500 focus:outline-none focus:border-[#17ff9a] focus:ring-2 focus:ring-[#17ff9a]/20 transition-all"
+                />
+                <button
+                  type="submit"
+                  disabled={!newMessage.trim()}
+                  className="w-12 h-12 bg-gradient-to-r from-[#17ff9a] to-[#10b981] rounded-xl flex items-center justify-center hover:shadow-xl hover:shadow-[#17ff9a]/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none active:scale-95"
+                >
+                  <Send className="w-5 h-5 text-black" />
+                </button>
+              </form>
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+            <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-[#17ff9a]/10 to-[#10b981]/10 border border-[#17ff9a]/20 flex items-center justify-center mb-6 shadow-xl shadow-[#17ff9a]/10">
+              <MessageCircle className="w-12 h-12 text-[#17ff9a]" />
+            </div>
+            <h3 className="text-2xl font-bold text-white mb-3">Select a conversation</h3>
+            <p className="text-sm text-gray-400 max-w-md">
+              Choose a conversation from the sidebar to start chatting securely
+            </p>
+          </div>
+        )}
+      </div>
+
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="relative w-full max-w-md bg-gradient-to-br from-[#1a1a1a] to-[#0f0f0f] border border-[#2a2a2a] rounded-3xl shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(23,255,154,0.1),transparent_60%)] rounded-3xl" />
+
+            <div className="relative p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold text-white">Profile Settings</h2>
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="w-8 h-8 rounded-lg bg-[#1a1a1a] hover:bg-[#252525] flex items-center justify-center transition-colors"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveSettings} className="space-y-5">
+                <div className="flex flex-col items-center mb-6">
+                  <div className="relative mb-4">
+                    {previewUrl ? (
+                      <img
+                        src={previewUrl}
+                        alt="Profile"
+                        className="w-20 h-20 rounded-full object-cover border-2 border-[#2a2a2a]"
+                      />
+                    ) : (
+                      <div className="w-20 h-20 rounded-full bg-gradient-to-br from-[#17ff9a] to-[#10b981] flex items-center justify-center">
+                        <span className="text-black text-2xl font-bold">
+                          {settingsUsername.charAt(0).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
+                    {(previewUrl || selectedFile) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedFile(null);
+                          setPreviewUrl('');
+                          setSettingsProfilePicture('');
+                        }}
+                        className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
+                      >
+                        <X className="w-3 h-3 text-white" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-400 mb-2">
+                    Profile Picture
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+                      onChange={handleFileSelect}
+                      className="hidden"
+                      id="profile-picture-upload"
+                    />
+                    <label
+                      htmlFor="profile-picture-upload"
+                      className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-gray-400 text-sm hover:border-[#17ff9a] hover:text-[#17ff9a] cursor-pointer transition-all"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      {selectedFile ? selectedFile.name : 'Choose an image'}
+                    </label>
+                  </div>
+                  <p className="mt-1.5 text-xs text-gray-500">
+                    JPG, PNG, GIF, or WebP. Max 5MB.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-400 mb-2">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    value={settingsUsername}
+                    onChange={(e) => setSettingsUsername(e.target.value)}
+                    placeholder="Enter username"
+                    className="w-full px-4 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-white text-sm placeholder-gray-600 focus:outline-none focus:border-[#17ff9a] focus:ring-2 focus:ring-[#17ff9a]/20 transition-all"
+                    required
+                  />
+                  <p className="mt-1.5 text-xs text-gray-500">
+                    3-20 characters, letters, numbers, and underscores only
+                  </p>
+                </div>
+
+                {settingsError && (
+                  <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl">
+                    <p className="text-red-400 text-sm">{settingsError}</p>
+                  </div>
+                )}
+
+                {settingsSuccess && (
+                  <div className="p-3 bg-[#17ff9a]/10 border border-[#17ff9a]/20 rounded-xl">
+                    <p className="text-[#17ff9a] text-sm">{settingsSuccess}</p>
+                  </div>
+                )}
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSettings(false)}
+                    className="flex-1 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] text-gray-300 font-medium rounded-xl hover:bg-[#252525] transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={settingsSaving}
+                    className="flex-1 py-2.5 bg-gradient-to-r from-[#17ff9a] to-[#10b981] text-black font-semibold rounded-xl hover:shadow-lg hover:shadow-[#17ff9a]/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {settingsSaving ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-[#0a0a0a] via-[#0f0f0f] to-transparent border-t border-[#1a1a1a] backdrop-blur-xl z-40 pb-safe">
+          <div className="flex items-center justify-around px-2 py-3">
+            <button
+              onClick={() => setActiveNavTab('chat')}
+              className={`flex flex-col items-center gap-1 px-4 py-2 rounded-xl transition-all duration-200 ${
+                activeNavTab === 'chat'
+                  ? 'text-[#17ff9a] bg-[#17ff9a]/10'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <MessageCircle className="w-5 h-5" />
+              <span className="text-xs font-medium">Chat</span>
+            </button>
+
+            <button
+              onClick={() => setActiveNavTab('lounge')}
+              className={`flex flex-col items-center gap-1 px-4 py-2 rounded-xl transition-all duration-200 ${
+                activeNavTab === 'lounge'
+                  ? 'text-[#17ff9a] bg-[#17ff9a]/10'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Users className="w-5 h-5" />
+              <span className="text-xs font-medium">Lounge</span>
+            </button>
+
+            <button
+              onClick={() => setActiveNavTab('wallet')}
+              className={`flex flex-col items-center gap-1 px-4 py-2 rounded-xl transition-all duration-200 ${
+                activeNavTab === 'wallet'
+                  ? 'text-[#17ff9a] bg-[#17ff9a]/10'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Wallet className="w-5 h-5" />
+              <span className="text-xs font-medium">Wallet</span>
+            </button>
+
+            <button
+              onClick={() => setActiveNavTab('explorer')}
+              className={`flex flex-col items-center gap-1 px-4 py-2 rounded-xl transition-all duration-200 ${
+                activeNavTab === 'explorer'
+                  ? 'text-[#17ff9a] bg-[#17ff9a]/10'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Compass className="w-5 h-5" />
+              <span className="text-xs font-medium">Explorer</span>
+            </button>
+          </div>
+      </div>
+    </div>
+  );
+}

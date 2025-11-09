@@ -1,0 +1,44 @@
+# ==========================
+# Environment Files
+# ==========================
+# Ignore .env everywhere (root + subfolders)
+**/.env
+**/.env.*
+
+# ==========================
+# Node Modules
+# ==========================
+# Ignore node_modules everywhere
+**/node_modules/
+
+# ==========================
+# Build / Dist Outputs
+# ==========================
+**/dist/
+**/build/
+**/.vite/
+**/.cache/
+coverage/
+
+# ==========================
+# Logs
+# ==========================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================
+# System / Editor Files
+# ==========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ==========================
+# Misc / Temp Files
+# ==========================
+*.tmp
+*.bak
+*.local

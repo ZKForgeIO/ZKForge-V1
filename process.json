@@ -1,0 +1,9 @@
+{
+    "script": "server.mjs",
+    "watch": true,
+    "ignore_watch": ["data/*"],
+    "env_production" : {
+    "NODE_ENV": "production"
+  },
+    "name": "chat-stark"
+}

@@ -1,0 +1,80 @@
+# 🔐 ZK-Chat — Zero-Knowledge Encrypted Messaging Platform
+
+ZK-Chat is a next-generation, privacy-first messaging ecosystem built with **end-to-end encryption**, **zero-knowledge authentication**, and **non-custodial identity**.  
+Every message, user session, and wallet interaction is cryptographically verified — **without ever storing or transmitting private keys**.
+
+---
+
+## 🚀 Core Features
+
+### 🧠 Zero-Knowledge Authentication (ZKAuth)
+- Users sign up and log in using a locally generated **Ed25519 keypair**.
+- Authentication uses **zero-knowledge proofs (ZK-STARK-compatible)** — proving identity ownership **without revealing the secret key**.
+- The backend never sees or stores private keys — only the derived **public key** and **Solana address**.
+
+### 🔐 End-to-End Chat Encryption
+- Every conversation and lounge message is **encrypted with per-room symmetric keys** (`nacl.secretbox` AES-grade security).
+- Keys are sealed and exchanged using ephemeral **Curve25519** boxes, derived from each user’s Ed25519 keypair.
+- Messages are signed with `nacl.sign.detached` for sender authenticity.
+- Even the server cannot decrypt messages — all encryption/decryption happens **client-side**.
+
+### 💬 Global Lounge (Public Encrypted Room)
+- Public discussion room with encrypted message broadcast using a temporary shared key.
+- Messages self-destruct after defined time windows.
+- Rate-limit and anti-spam protections enforced with Supabase RLS policies.
+
+### 💼 Wallet Integration (Non-Custodial)
+- Each user automatically derives a **Solana wallet** from their zero-knowledge secret.
+- Wallet private keys are generated and stored **only on the client** — never transmitted or saved on the backend.
+- Supports in-app USDC transactions, signed locally with the user’s keypair.
+
+### 🌐 WebSocket-Based Real-Time Updates
+- Secure WebSocket channel for live message delivery, typing indicators, and presence tracking.
+- Each message includes cryptographic nonce, ciphertext, and signature validation before render.
+
+---
+
+## 🧱 Architecture Overview
+
+| Layer | Description |
+|-------|--------------|
+| **Frontend (React + Tailwind)** | Handles encryption, proof generation, local key storage, and message rendering. |
+| **Backend (Express + Supabase)** | Stateless API for user sessions, rate limits, and message metadata. |
+| **Crypto Layer (`tweetnacl`, `ed2curve`, `bs58`)** | Provides all signing, sealing, and encryption primitives. |
+| **Database (Supabase PostgreSQL)** | Stores encrypted blobs (ciphertext + nonce + signature) and public keys only. |
+| **Realtime (WebSocket)** | Delivers encrypted payloads instantly to authorized peers. |
+
+Refer to [`ARCHITECTURE_FLOW.md`](./ARCHITECTURE_FLOW.md) and [`ZKSTARK.md`](./ZKSTARK.md) for technical diagrams and proof flow.
+
+---
+
+## 🧩 Key Design Principles
+
+1. **Zero Storage of Private Keys**  
+   - All signing keys and secrets exist *only* in the user’s local storage.  
+   - Backend and Supabase never receive, log, or store private data.
+
+2. **Provable Authentication**  
+   - Login requests include cryptographic proofs generated from a local secret key.  
+   - The backend verifies proofs without learning or reconstructing secrets.
+
+3. **Encrypted-At-Rest and In-Transit**  
+   - Every message is AES-grade encrypted before leaving the device.  
+   - Database entries and WebSocket messages are opaque ciphertexts.
+
+4. **Verifiable Sender Identity**  
+   - Every message includes a detached Ed25519 signature verifying authorship.  
+   - Any tampering or impersonation fails verification client-side.
+
+---
+
+## ⚙️ Tech Stack
+
+| Category | Libraries / Tools |
+|-----------|-------------------|
+| Frontend | React, TailwindCSS, TypeScript, Vite |
+| Backend | Node.js (Express), Supabase, MongoDB (for profiles & sessions) |
+| Cryptography | TweetNaCl, ed2curve, bs58, genSTARK |
+| Blockchain | Solana Web3.js |
+| Real-Time | WebSockets |
+| Security | Row-Level Security (RLS), JWT Sessions, Proof Verification |
