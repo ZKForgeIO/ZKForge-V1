@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Send, Menu, LogOut, MessageCircle, X, Settings, Users,
-  Wallet as WalletIcon, Compass
+  Wallet as WalletIcon, Compass,Zap
 } from 'lucide-react';
 
 import { AuthService, ApiClient, AuthStorage } from '../lib/authService';
@@ -10,12 +10,13 @@ import { WSClient } from '../lib/wsClient';
 import Lounge from '../components/Lounge';
 import Wallet from '../components/Wallet';
 import Explorer from './Explorer';
+import APIDoc from './ApiDoc'; // adjust the path if needed
 
 import nacl from 'tweetnacl';
 import ed2curve from 'ed2curve';
 import bs58 from 'bs58';
 import { ZKAuthService } from '../lib/zkAuth';
-
+import { Toaster, toast } from 'sonner';
 // ----------------- utils & guards -----------------
 const is32 = (u: Uint8Array | null | undefined) => !!u && u.length === 32;
 const is24 = (u: Uint8Array | null | undefined) => !!u && u.length === 24;
@@ -35,6 +36,15 @@ function getCachedConvKey(convId: string): Uint8Array | null {
 function dropConvKey(convId: string) {
   convKeyMem.delete(convId);
 }
+// ------------- toast helpers -------------
+const toastApiError = (msg?: string) =>
+  toast.error(msg || 'Something went wrong', { duration: 3500 });
+
+const toastWarn = (msg: string) =>
+  toast.warning(msg, { duration: 3000 });
+
+const toastOk = (msg: string) =>
+  toast.success(msg, { duration: 2500 });
 
 // ---------- types ----------
 type EncryptedMsg = {
@@ -96,7 +106,7 @@ export default function Chat() {
   const [isMobile, setIsMobile] = useState(false);
   const [isUserAtBottom, setIsUserAtBottom] = useState(true);
   const [updatedConversationId, setUpdatedConversationId] = useState<string | null>(null);
-  const [activeNavTab, setActiveNavTab] = useState<'chat' | 'lounge' | 'wallet' | 'explorer'>('chat');
+  const [activeNavTab, setActiveNavTab] = useState<'chat' | 'lounge' | 'wallet' | 'explorer' | 'x402'>('chat');
 
   const [pendingDmUserId, setPendingDmUserId] = useState<string | null>(null);
   const [pendingDmUserProfile, setPendingDmUserProfile] = useState<Profile | null>(null);
@@ -267,7 +277,7 @@ export default function Chat() {
                 created_at: m.created_at,
                 sender: m.sender
               }];
-              next.sort((a,b) => +new Date(a.created_at) - +new Date(b.created_at));
+              next.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at));
               return next;
             });
           }
@@ -358,7 +368,7 @@ export default function Chat() {
             sender: m.sender
           });
         }
-        out.sort((a,b) => +new Date(a.created_at) - +new Date(b.created_at));
+        out.sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at));
         setMessages(out);
         setIsUserAtBottom(true);
         setTimeout(() => scrollToBottom(), 30);
@@ -426,7 +436,7 @@ export default function Chat() {
 
       if (!r?.ok) {
         setNewMessage(text); // restore
-        alert(r?.error || 'Failed to send message');
+        toastApiError(r?.error || 'Failed to send message');
         return;
       }
 
@@ -434,7 +444,7 @@ export default function Chat() {
       setTimeout(() => scrollToBottom(), 20);
     } catch (err) {
       console.error('sendMessage failed', err);
-      alert('Failed to send message');
+      toastApiError('Failed to send message');
     }
   }
 
@@ -471,9 +481,9 @@ export default function Chat() {
   const handleSignOut = async () => { await AuthService.signOut(); navigate('/'); };
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
-    const ok = ['image/jpeg','image/jpg','image/png','image/gif','image/webp'].includes(f.type);
+    const ok = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'].includes(f.type);
     if (!ok) { setSettingsError('Please select a valid image file'); return; }
-    if (f.size > 5*1024*1024) { setSettingsError('Image size must be less than 5MB'); return; }
+    if (f.size > 5 * 1024 * 1024) { setSettingsError('Image size must be less than 5MB'); return; }
     setSelectedFile(f); setSettingsError('');
     const rd = new FileReader(); rd.onloadend = () => setPreviewUrl(rd.result as string); rd.readAsDataURL(f);
   }
@@ -503,7 +513,7 @@ export default function Chat() {
       setProfile({ ...profile!, username: settingsUsername, profile_picture_url: url || null });
       setSettingsSuccess('Profile updated successfully!');
       setTimeout(() => { setShowSettings(false); setSelectedFile(null); }, 1200);
-    } catch (err:any) {
+    } catch (err: any) {
       setSettingsError(err.message || 'Failed to update profile');
     } finally {
       setSettingsSaving(false);
@@ -536,10 +546,9 @@ export default function Chat() {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setShowMenu(!showMenu)}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 active:scale-95 ${
-                  showMenu ? 'bg-gradient-to-br from-[#17ff9a] to-[#10b981] text-black shadow-lg shadow-[#17ff9a]/20'
-                           : 'bg-[#1a1a1a] text-gray-400 hover:text-[#17ff9a] hover:bg-[#1f1f1f]'
-                }`}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 active:scale-95 ${showMenu ? 'bg-gradient-to-br from-[#17ff9a] to-[#10b981] text-black shadow-lg shadow-[#17ff9a]/20'
+                    : 'bg-[#1a1a1a] text-gray-400 hover:text-[#17ff9a] hover:bg-[#1f1f1f]'
+                  }`}
               >
                 <Menu className="w-5 h-5" />
               </button>
@@ -671,8 +680,8 @@ export default function Chat() {
                     ${selectedConversation === conv.id
                       ? 'bg-[#1a1a1a] border-l-4 border-[#17ff9a]'
                       : updatedConversationId === conv.id
-                      ? 'bg-[#17ff9a]/5 border-l-4 border-[#17ff9a]/50'
-                      : 'hover:bg-[#151515] border-l-4 border-transparent'
+                        ? 'bg-[#17ff9a]/5 border-l-4 border-[#17ff9a]/50'
+                        : 'hover:bg-[#151515] border-l-4 border-transparent'
                     }
                   `}
                   style={{ animation: `fadeInSlide 0.3s ease-out ${index * 0.05}s both` }}
@@ -885,6 +894,12 @@ export default function Chat() {
           )
         ) : activeNavTab === 'explorer' ? (
           <Explorer />
+        ) : activeNavTab === 'x402' ? (
+          <APIDoc
+            userId={user?.id}
+            username={profile?.username || 'User'}
+            profilePictureUrl={profile?.profile_picture_url}
+          />
         ) : (
           <div className="flex flex-col items-center justify-center h-full px-6 text-center">
             <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-[#17ff9a]/10 to-[#10b981]/10 border border-[#17ff9a]/20 flex items-center justify-center mb-6 shadow-xl shadow-[#17ff9a]/10">
@@ -902,16 +917,15 @@ export default function Chat() {
           <div className="absolute inset-0 bg-gradient-to-t from-[#17ff9a]/20 via-[#10b981]/10 to-transparent blur-2xl" />
           <div className="relative bg-gradient-to-br from-[#1a1a1a] via-[#151515] to-[#0f0f0f] rounded-3xl border border-[#2a2a2a] shadow-[0_8px_32px_rgba(0,0,0,0.6),0_-2px_16px_rgba(23,255,154,0.1)] backdrop-blur-xl overflow-hidden">
             <div className="relative flex items-center justify-around px-2 py-4">
-              {(['chat','lounge','wallet','explorer'] as const).map(tab => (
+              {(['chat', 'lounge', 'wallet', 'explorer', 'x402'] as const).map(tab => (
                 <button
                   key={tab}
                   onClick={() => {
                     setActiveNavTab(tab);
                     if (tab !== 'chat') setSelectedConversation(null);
                   }}
-                  className={`relative flex flex-col items-center gap-1.5 px-5 py-2.5 rounded-2xl transition-all duration-300 group ${
-                    activeNavTab === tab ? 'text-black scale-105' : 'text-gray-400 hover:text-white hover:scale-105'
-                  }`}
+                  className={`relative flex flex-col items-center gap-1.5 px-5 py-2.5 rounded-2xl transition-all duration-300 group ${activeNavTab === tab ? 'text-black scale-105' : 'text-gray-400 hover:text-white hover:scale-105'
+                    }`}
                 >
                   {activeNavTab === tab && (
                     <>
@@ -923,6 +937,8 @@ export default function Chat() {
                   {tab === 'lounge' && <Users className={`relative w-5 h-5 ${activeNavTab === tab ? 'scale-110' : 'group-hover:scale-110'}`} />}
                   {tab === 'wallet' && <WalletIcon className={`relative w-5 h-5 ${activeNavTab === tab ? 'scale-110' : 'group-hover:scale-110'}`} />}
                   {tab === 'explorer' && <Compass className={`relative w-5 h-5 ${activeNavTab === tab ? 'scale-110' : 'group-hover:scale-110'}`} />}
+                  {tab === 'x402' && <Zap className={`relative w-5 h-5 ${activeNavTab === tab ? 'scale-110' : 'group-hover:scale-110'}`} />}
+
                   <span className="relative text-[10px] font-semibold tracking-wide capitalize">{tab}</span>
                 </button>
               ))}
@@ -972,7 +988,7 @@ export default function Chat() {
                   <div className="relative">
                     <input type="file" accept="image/jpeg,image/jpg,image/png,image/gif,image/webp" onChange={handleFileSelect} className="hidden" id="profile-picture-upload" />
                     <label htmlFor="profile-picture-upload" className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-gray-400 text-sm hover:border-[#17ff9a] hover:text-[#17ff9a] cursor-pointer transition-all">
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
                       {selectedFile ? selectedFile.name : 'Choose an image'}
                     </label>
                   </div>

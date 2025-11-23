@@ -15,11 +15,13 @@ import Contracts from './pages/docs/Contracts';
 import API from './pages/docs/API';
 import TechStack from './pages/docs/TechStack';
 import Roadmap from './pages/docs/Roadmap';
+import { Toaster } from 'sonner';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
+    <Toaster position="top-center" richColors closeButton theme="dark" expand />
       <Routes>
         {/* <Route path="/" element={<Landing />} /> */}
         {/* <Route path="/dapp/auth" element={<Auth />} /> */}

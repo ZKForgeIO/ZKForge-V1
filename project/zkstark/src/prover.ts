@@ -1,289 +1,227 @@
+// src/prover.ts
 /**
- * zkSTARK Prover
+ * zkSTARK-style Auth Prover
  *
- * Generates zero-knowledge proofs for computational statements.
- * The prover demonstrates knowledge of a witness satisfying constraints
- * without revealing the witness itself.
+ * We prove knowledge of a secret s such that a public value Y is obtained
+ * by iterating a field hash H for `steps` rounds:
+ *
+ *   t[0]   = H(s)
+ *   t[i+1] = H(t[i])   for i = 0..steps-2
+ *   Y      = t[steps-1]
+ *
+ * The prover commits to the full trace with a Merkle tree and uses
+ * a Fiat–Shamir challenge to open random positions. This is a
+ * STARK-style (transparent, hash-based) argument specialized
+ * for authentication.
  */
 
-import { FieldElement, STARK_PRIME } from './field';
-import { Polynomial } from './polynomial';
-import { MerkleTree } from './merkle';
 import { sha256 } from '@noble/hashes/sha256';
+import {
+  FieldElement,
+  authHash,
+  fieldElementToBytes
+} from './field';
+import { MerkleTree, MerkleProof } from './merkle';
 
+/**
+ * Public statement for authentication.
+ * `finalHash` is what the backend stores / knows as the user's commitment.
+ */
 export interface Statement {
-  publicInput: FieldElement[];
-  constraints: Constraint[];
+  steps: number;             // length of the hash chain (>=2)
+  finalHash: FieldElement;   // t[steps-1]
 }
 
-export interface Constraint {
-  evaluate: (trace: FieldElement[]) => FieldElement;
-}
-
+/**
+ * Secret witness: the user's secret value.
+ */
 export interface Witness {
-  privateInput: FieldElement[];
-  trace: FieldElement[];
+  secret: FieldElement;
 }
 
+/**
+ * Optional placeholder for future generic constraints.
+ * Kept for API compatibility with earlier versions.
+ */
+export interface Constraint {}
+
+/**
+ * Parameters for the auth proof.
+ *
+ * - steps: number of hash iterations in the chain
+ * - queries: how many random positions are opened
+ */
+export interface AuthParams {
+  steps: number;
+  queries: number;
+}
+
+/**
+ * Single opening in the auth proof.
+ */
+export interface AuthOpening {
+  index: number;          // i (we open t[i] and t[i+1])
+  current: FieldElement;  // t[i]
+  next: FieldElement;     // t[i+1]
+  proofCurrent: MerkleProof;
+  proofNext: MerkleProof;
+}
+
+/**
+ * Complete auth proof object.
+ */
 export interface Proof {
-  commitment: Uint8Array;
-  evaluations: FieldElement[];
-  merkleProofs: string[];
-  queryIndices: number[];
-  friCommitments: Uint8Array[];
-  polynomialDegree: number;
+  root: Uint8Array;       // Merkle root of the entire trace
+  indices: number[];      // challenged indices
+  openings: AuthOpening[]; // openings for each index
 }
 
+/**
+ * Build the full hash chain trace t[0..steps-1] from the secret.
+ */
+export function buildAuthTrace(
+  witness: Witness,
+  params: AuthParams
+): FieldElement[] {
+  const { steps } = params;
+  if (steps < 2) {
+    throw new Error('steps must be >= 2');
+  }
+
+  const trace: FieldElement[] = new Array(steps);
+  trace[0] = authHash(witness.secret);
+  for (let i = 1; i < steps; i++) {
+    trace[i] = authHash(trace[i - 1]);
+  }
+  return trace;
+}
+
+/**
+ * Compute the Fiat–Shamir seed from the Merkle root and public statement.
+ */
+export function computeChallengeSeed(root: Uint8Array, statement: Statement): Uint8Array {
+  const finalBytes = fieldElementToBytes(statement.finalHash);
+  const data = new Uint8Array(root.length + finalBytes.length);
+  data.set(root, 0);
+  data.set(finalBytes, root.length);
+  return sha256(data);
+}
+
+/**
+ * Deterministically derive query indices from a seed.
+ *
+ * We always include index `steps - 2` so that one query covers the
+ * last transition t[steps-2] -> t[steps-1] = finalHash.
+ */
+export function deriveQueryIndices(
+  seed: Uint8Array,
+  params: AuthParams
+): number[] {
+  const { steps, queries } = params;
+  if (queries < 1) {
+    throw new Error('queries must be >= 1');
+  }
+  if (steps < 2) {
+    throw new Error('steps must be >= 2');
+  }
+  if (queries > steps - 1) {
+    throw new Error('queries must be <= steps - 1');
+  }
+
+  const indices: number[] = [];
+
+  // Force last transition to be checked (steps-2 -> steps-1)
+  const forcedIndex = steps - 2;
+  indices.push(forcedIndex);
+
+  let counter = 0;
+  while (indices.length < queries) {
+    const ctr = new Uint8Array(4);
+    ctr[0] = (counter >>> 24) & 0xff;
+    ctr[1] = (counter >>> 16) & 0xff;
+    ctr[2] = (counter >>> 8) & 0xff;
+    ctr[3] = counter & 0xff;
+
+    const data = new Uint8Array(seed.length + ctr.length);
+    data.set(seed, 0);
+    data.set(ctr, seed.length);
+    const h = sha256(data);
+
+    let acc = 0n;
+    // Use first 8 bytes to derive an index
+    for (let i = 0; i < 8; i++) {
+      acc = (acc << 8n) | BigInt(h[i]);
+    }
+
+    const idx = Number(acc % BigInt(steps - 1)); // indices in [0, steps-2]
+    if (!indices.includes(idx)) {
+      indices.push(idx);
+    }
+
+    counter++;
+  }
+
+  return indices;
+}
+
+/**
+ * Main prover function, used by StarkProver class below.
+ */
+export function generateAuthProof(
+  statement: Statement,
+  witness: Witness,
+  params: AuthParams
+): Proof {
+  const { steps, queries } = params;
+  if (queries < 1) {
+    throw new Error('queries must be >= 1');
+  }
+  if (queries > steps - 1) {
+    throw new Error('queries must be <= steps - 1');
+  }
+
+  const trace = buildAuthTrace(witness, params);
+  const finalValue = trace[steps - 1];
+  if (!finalValue.equals(statement.finalHash)) {
+    throw new Error('Witness does not match statement.finalHash');
+  }
+
+  // Commit to the whole trace using a Merkle tree
+  const leaves = trace.map((e) => fieldElementToBytes(e));
+  const tree = new MerkleTree(leaves);
+  const root = tree.getRoot();
+
+  // Fiat–Shamir challenge
+  const seed = computeChallengeSeed(root, statement);
+  const indices = deriveQueryIndices(seed, params);
+
+  // Open the requested positions (t[i], t[i+1])
+  const openings: AuthOpening[] = indices.map((index) => {
+    const current = trace[index];
+    const next = trace[index + 1];
+    const proofCurrent = tree.getProof(index);
+    const proofNext = tree.getProof(index + 1);
+    return { index, current, next, proofCurrent, proofNext };
+  });
+
+  return { root, indices, openings };
+}
+
+/**
+ * Convenience class API, similar to your original StarkProver.
+ */
 export class StarkProver {
   statement: Statement;
   witness: Witness;
-  securityParameter: number;
+  params: AuthParams;
 
-  constructor(statement: Statement, witness: Witness, securityParameter: number = 128) {
+  constructor(statement: Statement, witness: Witness, params: AuthParams) {
     this.statement = statement;
     this.witness = witness;
-    this.securityParameter = securityParameter;
+    this.params = params;
   }
 
   generateProof(): Proof {
-    const trace = this.witness.trace;
-
-    const tracePolynomial = this.interpolateTrace(trace);
-
-    const constraintPolynomials = this.evaluateConstraints(tracePolynomial);
-
-    const compositionPolynomial = this.combineConstraints(constraintPolynomials);
-
-    const domain = this.getEvaluationDomain(compositionPolynomial.degree() * 4);
-
-    const evaluations = domain.map(point => compositionPolynomial.evaluate(point));
-
-    const commitment = this.commitToEvaluations(evaluations);
-
-    const challenge = this.generateChallenge(commitment);
-
-    const numQueries = Math.ceil(this.securityParameter / Math.log2(domain.length));
-    const queryIndices = this.generateQueryIndices(challenge, numQueries, domain.length);
-
-    const queriedEvaluations = queryIndices.map(i => evaluations[i]);
-
-    const merkleTree = new MerkleTree(
-      evaluations.map(e => this.fieldToBytes(e))
-    );
-
-    const merkleProofs = queryIndices.map(i =>
-      this.serializeMerkleProof(merkleTree.getProof(i))
-    );
-
-    const friCommitments = this.generateFriCommitments(
-      compositionPolynomial,
-      domain,
-      challenge
-    );
-
-    return {
-      commitment,
-      evaluations: queriedEvaluations,
-      merkleProofs,
-      queryIndices,
-      friCommitments,
-      polynomialDegree: compositionPolynomial.degree()
-    };
-  }
-
-  private interpolateTrace(trace: FieldElement[]): Polynomial {
-    const points: [FieldElement, FieldElement][] = trace.map((value, index) => [
-      new FieldElement(BigInt(index), STARK_PRIME),
-      value
-    ]);
-
-    return Polynomial.interpolate(points);
-  }
-
-  private evaluateConstraints(tracePolynomial: Polynomial): Polynomial[] {
-    return this.statement.constraints.map(constraint => {
-      const evaluations: FieldElement[] = [];
-
-      for (let i = 0; i < this.witness.trace.length; i++) {
-        const point = new FieldElement(BigInt(i), STARK_PRIME);
-        const traceValue = tracePolynomial.evaluate(point);
-        evaluations.push(constraint.evaluate([traceValue]));
-      }
-
-      const points: [FieldElement, FieldElement][] = evaluations.map((value, index) => [
-        new FieldElement(BigInt(index), STARK_PRIME),
-        value
-      ]);
-
-      return Polynomial.interpolate(points);
-    });
-  }
-
-  private combineConstraints(polynomials: Polynomial[]): Polynomial {
-    if (polynomials.length === 0) {
-      return Polynomial.zero(STARK_PRIME);
-    }
-
-    let result = polynomials[0];
-
-    for (let i = 1; i < polynomials.length; i++) {
-      const randomCoef = this.generateRandomFieldElement();
-      result = result.add(polynomials[i].scalarMul(randomCoef));
-    }
-
-    return result;
-  }
-
-  private getEvaluationDomain(size: number): FieldElement[] {
-    const domainSize = this.nextPowerOfTwo(size);
-    const generator = this.findPrimitiveRoot(domainSize);
-    const domain: FieldElement[] = [];
-
-    let current = FieldElement.one(STARK_PRIME);
-    for (let i = 0; i < domainSize; i++) {
-      domain.push(current);
-      current = current.mul(generator);
-    }
-
-    return domain;
-  }
-
-  private commitToEvaluations(evaluations: FieldElement[]): Uint8Array {
-    const leaves = evaluations.map(e => this.fieldToBytes(e));
-    const tree = new MerkleTree(leaves);
-    return tree.getRoot();
-  }
-
-  private generateChallenge(commitment: Uint8Array): bigint {
-    const hash = sha256(commitment);
-    let result = 0n;
-    for (let i = 0; i < 32; i++) {
-      result = (result << 8n) | BigInt(hash[i]);
-    }
-    return result % STARK_PRIME;
-  }
-
-  private generateQueryIndices(seed: bigint, count: number, max: number): number[] {
-    const indices: number[] = [];
-    let current = seed;
-
-    while (indices.length < count) {
-      const hash = sha256(this.bigIntToBytes(current));
-      let value = 0n;
-      for (let i = 0; i < 8; i++) {
-        value = (value << 8n) | BigInt(hash[i]);
-      }
-
-      const index = Number(value % BigInt(max));
-      if (!indices.includes(index)) {
-        indices.push(index);
-      }
-
-      current = (current + 1n) % STARK_PRIME;
-    }
-
-    return indices;
-  }
-
-  private generateFriCommitments(
-    polynomial: Polynomial,
-    domain: FieldElement[],
-    challenge: bigint
-  ): Uint8Array[] {
-    const commitments: Uint8Array[] = [];
-    let currentPoly = polynomial;
-
-    while (currentPoly.degree() > 0) {
-      const evaluations = domain.map(point => currentPoly.evaluate(point));
-      const commitment = this.commitToEvaluations(evaluations);
-      commitments.push(commitment);
-
-      currentPoly = this.foldPolynomial(currentPoly, new FieldElement(challenge, STARK_PRIME));
-    }
-
-    return commitments;
-  }
-
-  private foldPolynomial(poly: Polynomial, alpha: FieldElement): Polynomial {
-    const evenCoeffs: FieldElement[] = [];
-    const oddCoeffs: FieldElement[] = [];
-
-    for (let i = 0; i < poly.coefficients.length; i++) {
-      if (i % 2 === 0) {
-        evenCoeffs.push(poly.coefficients[i]);
-      } else {
-        oddCoeffs.push(poly.coefficients[i]);
-      }
-    }
-
-    const evenPoly = new Polynomial(evenCoeffs.length > 0 ? evenCoeffs : [FieldElement.zero(STARK_PRIME)]);
-    const oddPoly = new Polynomial(oddCoeffs.length > 0 ? oddCoeffs : [FieldElement.zero(STARK_PRIME)]);
-
-    return evenPoly.add(oddPoly.scalarMul(alpha));
-  }
-
-  private nextPowerOfTwo(n: number): number {
-    let power = 1;
-    while (power < n) {
-      power *= 2;
-    }
-    return power;
-  }
-
-  private findPrimitiveRoot(order: number): FieldElement {
-    const phi = STARK_PRIME - 1n;
-    const requiredOrder = phi / BigInt(order);
-
-    for (let g = 2n; g < STARK_PRIME; g++) {
-      const element = new FieldElement(g, STARK_PRIME);
-      const powered = element.pow(requiredOrder);
-
-      if (!powered.equals(FieldElement.one(STARK_PRIME))) {
-        continue;
-      }
-
-      const check = element.pow(requiredOrder / 2n);
-      if (!check.equals(FieldElement.one(STARK_PRIME))) {
-        return element;
-      }
-    }
-
-    throw new Error('Could not find primitive root');
-  }
-
-  private generateRandomFieldElement(): FieldElement {
-    const randomBytes = new Uint8Array(32);
-    crypto.getRandomValues(randomBytes);
-
-    let value = 0n;
-    for (const byte of randomBytes) {
-      value = (value << 8n) | BigInt(byte);
-    }
-
-    return new FieldElement(value, STARK_PRIME);
-  }
-
-  private fieldToBytes(element: FieldElement): Uint8Array {
-    return this.bigIntToBytes(element.value);
-  }
-
-  private bigIntToBytes(value: bigint): Uint8Array {
-    const hex = value.toString(16).padStart(64, '0');
-    const bytes = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) {
-      bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-    }
-    return bytes;
-  }
-
-  private serializeMerkleProof(proof: any): string {
-    return JSON.stringify({
-      leaf: Array.from(proof.leaf),
-      proof: proof.proof.map((p: any) => ({
-        hash: Array.from(p.hash),
-        position: p.position
-      })),
-      root: Array.from(proof.root)
-    });
+    return generateAuthProof(this.statement, this.witness, this.params);
   }
 }

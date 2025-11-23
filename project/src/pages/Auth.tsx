@@ -10,6 +10,7 @@ export default function Auth() {
   const [showSecret, setShowSecret] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [username, setUsername] = useState('');
 
   useEffect(() => {
     const checkExistingAuth = async () => {
@@ -37,7 +38,7 @@ export default function Auth() {
         return;
       }
 
-      const result = await AuthService.signIn(cleanedSecret);
+      const result = await AuthService.signIn(username.trim(), cleanedSecret);
 
       if (result.success) {
         navigate('/dapp/chat');
@@ -97,6 +98,21 @@ export default function Auth() {
 
             {isSignIn ? (
               <form onSubmit={handleSignIn} className="space-y-5">
+                <div>
+                  <label htmlFor="username" className="block text-sm font-medium text-gray-300 mb-2">
+                    Username
+                  </label>
+                  <input
+                    id="username"
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    required
+                    placeholder="your_username"
+                    className="w-full px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-[#17ff9a] focus:ring-2 focus:ring-[#17ff9a]/20 transition-all text-sm"
+                  />
+                </div>
+
                 <div>
                   <label htmlFor="zkSecret" className="block text-sm font-medium text-gray-300 mb-2">
                     ZK Secret Key

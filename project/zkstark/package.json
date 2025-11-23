@@ -6,11 +6,12 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "jest",
-    "example:fibonacci": "ts-node examples/fibonacci.ts",
-    "example:range-proof": "ts-node examples/range-proof.ts",
+    "test": "jest --config jest.config.cjs",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write \"src/**/*.ts\" \"examples/**/*.ts\" \"tests/**/*.ts\""
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "zkstark",

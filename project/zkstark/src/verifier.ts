@@ -1,214 +1,154 @@
+// src/verifier.ts
 /**
- * zkSTARK Verifier
+ * zkSTARK-style Auth Verifier
  *
- * Verifies zero-knowledge proofs efficiently without knowledge of the witness.
- * The verifier checks proof validity using public inputs and commitments.
+ * Verifies proofs that a secret hash chain of length `steps`
+ * ends in a known public value `finalHash`, without learning
+ * the secret itself.
  */
 
-import { FieldElement, STARK_PRIME } from './field';
-import { Polynomial } from './polynomial';
-import { MerkleTree, MerkleProof } from './merkle';
-import { sha256 } from '@noble/hashes/sha256';
-import { Statement, Proof } from './prover';
+import { FieldElement, authHash } from './field';
+import { MerkleProof } from './merkle';
+import {
+  Statement,
+  Proof,
+  AuthParams,
+  computeChallengeSeed,
+  deriveQueryIndices
+} from './prover';
 
 export class StarkVerifier {
   statement: Statement;
-  securityParameter: number;
+  params: AuthParams;
 
-  constructor(statement: Statement, securityParameter: number = 128) {
+  constructor(statement: Statement, params: AuthParams) {
     this.statement = statement;
-    this.securityParameter = securityParameter;
+    this.params = params;
   }
 
   verify(proof: Proof): boolean {
     try {
-      if (!this.verifyCommitment(proof)) {
-        console.error('Commitment verification failed');
+      const { steps, queries } = this.params;
+
+      if (steps < 2 || queries < 1) {
+        return false;
+      }
+      if (proof.indices.length !== queries) {
+        return false;
+      }
+      if (proof.openings.length !== queries) {
         return false;
       }
 
-      if (!this.verifyEvaluations(proof)) {
-        console.error('Evaluation verification failed');
+      // Recompute Fiat–Shamir challenge and expected indices
+      const seed = computeChallengeSeed(proof.root, this.statement);
+      const expectedIndices = deriveQueryIndices(seed, this.params);
+
+      if (!arrayEqualNumbers(expectedIndices, proof.indices)) {
+        // Indices were tampered with
         return false;
       }
 
-      if (!this.verifyMerkleProofs(proof)) {
-        console.error('Merkle proof verification failed');
-        return false;
+      let finalEdgeChecked = false;
+
+      for (let i = 0; i < proof.indices.length; i++) {
+        const index = proof.indices[i];
+        const opening = proof.openings[i];
+
+        if (opening.index !== index) {
+          return false;
+        }
+
+        if (index < 0 || index >= steps - 1) {
+          // need t[i] and t[i+1]
+          return false;
+        }
+
+        const { current, next, proofCurrent, proofNext } = opening;
+
+        // Sanity: Merkle proofs should be tied to the same root
+        if (
+          !arraysEqual(proofCurrent.root, proof.root) ||
+          !arraysEqual(proofNext.root, proof.root)
+        ) {
+          return false;
+        }
+
+        // Check Merkle path validity
+        if (!proofCurrent.verify()) return false;
+        if (!proofNext.verify()) return false;
+
+        // Check transition constraint: t[i+1] = H(t[i])
+        const expectedNext: FieldElement = authHash(current);
+        if (!expectedNext.equals(next)) {
+          return false;
+        }
+
+        // If this is the last transition, check finalHash
+        if (index === steps - 2) {
+          if (!next.equals(this.statement.finalHash)) {
+            return false;
+          }
+          finalEdgeChecked = true;
+        }
       }
 
-      if (!this.verifyFriProtocol(proof)) {
-        console.error('FRI protocol verification failed');
-        return false;
-      }
-
-      if (!this.verifyConstraints(proof)) {
-        console.error('Constraint verification failed');
+      if (!finalEdgeChecked) {
+        // By design, deriveQueryIndices always includes steps-2,
+        // so if we didn't see it, something is wrong.
         return false;
       }
 
       return true;
-    } catch (error) {
-      console.error('Verification error:', error);
+    } catch (err) {
+      // Any error means verification failed
       return false;
     }
   }
 
-  private verifyCommitment(proof: Proof): boolean {
-    if (!proof.commitment || proof.commitment.length !== 32) {
-      return false;
-    }
-
-    return true;
-  }
-
-  private verifyEvaluations(proof: Proof): boolean {
-    if (!proof.evaluations || proof.evaluations.length === 0) {
-      return false;
-    }
-
-    for (const evaluation of proof.evaluations) {
-      if (!(evaluation instanceof FieldElement)) {
-        return false;
-      }
-
-      if (evaluation.modulus !== STARK_PRIME) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  private verifyMerkleProofs(proof: Proof): boolean {
-    if (proof.merkleProofs.length !== proof.queryIndices.length) {
-      return false;
-    }
-
-    for (let i = 0; i < proof.merkleProofs.length; i++) {
-      try {
-        const proofData = JSON.parse(proof.merkleProofs[i]);
-        const merkleProof = new MerkleProof(
-          new Uint8Array(proofData.leaf),
-          proofData.proof.map((p: any) => ({
-            hash: new Uint8Array(p.hash),
-            position: p.position as 'left' | 'right'
-          })),
-          proof.commitment
-        );
-
-        if (!merkleProof.verify()) {
-          return false;
-        }
-      } catch (error) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  private verifyFriProtocol(proof: Proof): boolean {
-    if (!proof.friCommitments || proof.friCommitments.length === 0) {
-      return false;
-    }
-
-    for (const commitment of proof.friCommitments) {
-      if (!commitment || commitment.length !== 32) {
-        return false;
-      }
-    }
-
-    const expectedLayers = Math.ceil(Math.log2(proof.polynomialDegree));
-    if (proof.friCommitments.length < expectedLayers) {
-      return false;
-    }
-
-    return true;
-  }
-
-  private verifyConstraints(proof: Proof): boolean {
-    const challenge = this.generateChallenge(proof.commitment);
-
-    for (let i = 0; i < proof.queryIndices.length; i++) {
-      const index = proof.queryIndices[i];
-      const evaluation = proof.evaluations[i];
-
-      const point = this.getEvaluationPoint(index, proof.polynomialDegree * 4);
-
-      let constraintsSatisfied = true;
-      for (const constraint of this.statement.constraints) {
-        const constraintValue = constraint.evaluate([evaluation]);
-
-        if (!constraintValue.isZero()) {
-          const vanishingEval = this.evaluateVanishingPolynomial(point);
-          if (vanishingEval.isZero()) {
-            constraintsSatisfied = false;
-            break;
-          }
-        }
-      }
-
-      if (!constraintsSatisfied) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  private generateChallenge(commitment: Uint8Array): bigint {
-    const hash = sha256(commitment);
-    let result = 0n;
-    for (let i = 0; i < 32; i++) {
-      result = (result << 8n) | BigInt(hash[i]);
-    }
-    return result % STARK_PRIME;
-  }
-
-  private getEvaluationPoint(index: number, domainSize: number): FieldElement {
-    const generator = this.findPrimitiveRoot(domainSize);
-    return generator.pow(BigInt(index));
-  }
-
-  private findPrimitiveRoot(order: number): FieldElement {
-    const phi = STARK_PRIME - 1n;
-    const requiredOrder = phi / BigInt(order);
-
-    for (let g = 2n; g < 100n; g++) {
-      const element = new FieldElement(g, STARK_PRIME);
-      const powered = element.pow(requiredOrder);
-
-      if (!powered.equals(FieldElement.one(STARK_PRIME))) {
-        continue;
-      }
-
-      return element;
-    }
-
-    return new FieldElement(2n, STARK_PRIME);
-  }
-
-  private evaluateVanishingPolynomial(point: FieldElement): FieldElement {
-    const traceLength = this.statement.publicInput.length;
-    return point.pow(BigInt(traceLength)).sub(FieldElement.one(STARK_PRIME));
-  }
+  /**
+   * Optional helpers, similar shape to old API.
+   */
 
   getProofSize(proof: Proof): number {
-    let size = 32;
-    size += proof.evaluations.length * 32;
-    size += proof.merkleProofs.reduce((sum, p) => sum + p.length, 0);
-    size += proof.queryIndices.length * 4;
-    size += proof.friCommitments.length * 32;
-    size += 4;
-
+    let size = 0;
+    size += proof.root.length;
+    size += proof.indices.length * 4;
+    for (const opening of proof.openings) {
+      // current + next field elements (32 bytes each)
+      size += 64;
+      size += serializedMerkleProofSize(opening.proofCurrent);
+      size += serializedMerkleProofSize(opening.proofNext);
+    }
     return size;
   }
 
   getVerificationComplexity(proof: Proof): string {
-    const numQueries = proof.queryIndices.length;
-    const treeDepth = Math.ceil(Math.log2(proof.polynomialDegree * 4));
-
-    return `O(${numQueries} * log(${proof.polynomialDegree})) = O(${numQueries * treeDepth})`;
+    const numQueries = proof.indices.length;
+    // complexity is dominated by Merkle path verifications
+    return `O(${numQueries} * log(traceLength))`;
   }
+}
+
+function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function arrayEqualNumbers(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function serializedMerkleProofSize(mp: MerkleProof): number {
+  // Rough estimate: each node is 32 bytes + 1 byte position
+  // depth ~ log2(#leaves), but we don't know leaves count here.
+  // Just approximate by proof length * 33.
+  return mp.proof.length * 33;
 }

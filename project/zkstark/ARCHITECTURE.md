@@ -4,13 +4,25 @@ This document provides a deep technical overview of the zkSTARK implementation.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Mathematical Foundation](#mathematical-foundation)
-3. [Core Components](#core-components)
-4. [Proof Generation Pipeline](#proof-generation-pipeline)
-5. [Verification Pipeline](#verification-pipeline)
-6. [Security Analysis](#security-analysis)
-7. [Performance Optimization](#performance-optimization)
+1. [Project Structure](#project-structure)
+2. [Overview](#overview)
+3. [Mathematical Foundation](#mathematical-foundation)
+4. [Core Components](#core-components)
+5. [Proof Generation Pipeline](#proof-generation-pipeline)
+6. [Verification Pipeline](#verification-pipeline)
+7. [Security Analysis](#security-analysis)
+8. [Performance Optimization](#performance-optimization)
+
+## Project Structure
+
+The codebase is organized into the following core components:
+
+- **`src/field.ts`**: Implements finite field arithmetic over the STARK prime field. Handles addition, multiplication, inversion, and exponentiation.
+- **`src/polynomial.ts`**: Provides polynomial operations including evaluation, interpolation (Lagrange), and arithmetic.
+- **`src/merkle.ts`**: Implements Merkle trees for cryptographic commitments to execution traces and polynomial evaluations.
+- **`src/prover.ts`**: The core STARK prover implementation. Orchestrates trace generation, constraint evaluation, low-degree extension, and FRI proof generation.
+- **`src/verifier.ts`**: The STARK verifier. Checks Merkle proofs, consistency of constraints, and FRI commitments to validate the proof.
+
 
 ## Overview
 

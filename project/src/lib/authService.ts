@@ -63,38 +63,41 @@ export class AuthService {
       return { success:false, error: e?.message || 'Failed to create account' };
     }
   }
+static async signIn(username: string, zkSecretKey: string): Promise<AuthResult> {
+  try {
+    const r = await fetch(`${API_BASE}/auth/signin`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, zkSecretKey })
+    });
+    const res = await r.json();
+    if (!res.success) return { success: false, error: res.error || 'Failed to sign in' };
 
-  static async signIn(zkSecretKey: string): Promise<AuthResult> {
-    try {
-      if (!ZKAuthService.validateSecretKeyFormat(zkSecretKey)) {
-        return { success:false, error:'Invalid secret key format' };
-      }
-      const r = await fetch(`${API_BASE}/auth/signin`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ zkSecretKey })
-      });
-      const res = await r.json();
-      if (!res.success) return { success:false, error: res.error || 'Failed to sign in' };
+    const auth: StoredAuthData = {
+      userId: res.userId,
+      publicKey: res.publicKey,
+      sessionToken: res.sessionToken,
+      expiresAt: res.expiresAt
+    };
+    AuthStorage.saveAuthData(auth);
+    AuthStorage.saveSecretKey(zkSecretKey); // zkSecretKey is used as zkProof
 
-      const auth: StoredAuthData = {
-        userId: res.userId,
-        publicKey: res.publicKey,
-        sessionToken: res.sessionToken,
-        expiresAt: res.expiresAt
-      };
-      AuthStorage.saveAuthData(auth);
-      AuthStorage.saveSecretKey(zkSecretKey);
+    const solanaWallet = SolanaWalletService.deriveWalletFromZKSecret(zkSecretKey);
+    WalletStorage.saveWallet(solanaWallet);
+    WalletStorage.savePublicInfo(solanaWallet.publicKey);
 
-      const solanaWallet = SolanaWalletService.deriveWalletFromZKSecret(zkSecretKey);
-      WalletStorage.saveWallet(solanaWallet);
-      WalletStorage.savePublicInfo(solanaWallet.publicKey);
-
-      return { success:true, userId: res.userId, username: res.username, publicKey: res.publicKey, solanaAddress: res.solanaAddress, sessionToken: res.sessionToken };
-    } catch (e:any) {
-      return { success:false, error: e?.message || 'Failed to sign in' };
-    }
+    return {
+      success: true,
+      userId: res.userId,
+      username: res.username,
+      publicKey: res.publicKey,
+      solanaAddress: res.solanaAddress,
+      sessionToken: res.sessionToken
+    };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Failed to sign in' };
   }
+}
 
   static async signOut(): Promise<void> {
     AuthStorage.clearAuthData();

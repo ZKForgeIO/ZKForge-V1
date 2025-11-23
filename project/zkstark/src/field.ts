@@ -1,5 +1,6 @@
+// src/field.ts
 /**
- * Finite Field Arithmetic for zkSTARK
+ * Finite Field Arithmetic for zkSTARK-style protocols
  *
  * Implements arithmetic operations over a prime field F_p.
  * This is the foundation for all zkSTARK operations.
@@ -20,30 +21,22 @@ export class FieldElement {
   }
 
   add(other: FieldElement): FieldElement {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Cannot add elements from different fields');
-    }
+    this.ensureSameField(other);
     return new FieldElement(this.value + other.value, this.modulus);
   }
 
   sub(other: FieldElement): FieldElement {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Cannot subtract elements from different fields');
-    }
+    this.ensureSameField(other);
     return new FieldElement(this.value - other.value, this.modulus);
   }
 
   mul(other: FieldElement): FieldElement {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Cannot multiply elements from different fields');
-    }
+    this.ensureSameField(other);
     return new FieldElement(this.value * other.value, this.modulus);
   }
 
   div(other: FieldElement): FieldElement {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Cannot divide elements from different fields');
-    }
+    this.ensureSameField(other);
     return this.mul(other.inverse());
   }
 
@@ -53,7 +46,7 @@ export class FieldElement {
     }
 
     let result = new FieldElement(1n, this.modulus);
-    let base = this;
+    let base: FieldElement = this;   // <-- explicit type fixes TS
     let exp = exponent;
 
     while (exp > 0n) {
@@ -66,6 +59,7 @@ export class FieldElement {
 
     return result;
   }
+
 
   inverse(): FieldElement {
     if (this.value === 0n) {
@@ -114,6 +108,12 @@ export class FieldElement {
     return this.value.toString();
   }
 
+  private ensureSameField(other: FieldElement) {
+    if (this.modulus !== other.modulus) {
+      throw new Error('Field mismatch');
+    }
+  }
+
   static zero(modulus: bigint): FieldElement {
     return new FieldElement(0n, modulus);
   }
@@ -124,11 +124,62 @@ export class FieldElement {
 }
 
 /**
- * Standard prime field for zkSTARK
- * Using a 256-bit prime for strong security
+ * Standard prime field for zkSTARK-style constructions.
+ * 251-bit prime used in many STARK designs.
  */
 export const STARK_PRIME = 2n ** 251n + 17n * 2n ** 192n + 1n;
 
-export function createField(value: bigint): FieldElement {
-  return new FieldElement(value, STARK_PRIME);
+/**
+ * Helper to create a field element in F_p from various inputs.
+ */
+export function createField(value: bigint | number | string): FieldElement {
+  let v: bigint;
+  if (typeof value === 'bigint') {
+    v = value;
+  } else if (typeof value === 'number') {
+    v = BigInt(value);
+  } else {
+    // string: decimal or 0x-prefixed
+    v = BigInt(value);
+  }
+  return new FieldElement(v, STARK_PRIME);
+}
+
+/**
+ * Toy hash function inside the field.
+ * H(x) = x^3 + 7 (mod p)
+ *
+ * NOTE: This is NOT a cryptographic hash. It is a simple
+ * algebraic transition used to build a STARK-style example
+ * for authentication.
+ */
+export function authHash(x: FieldElement): FieldElement {
+  const c7 = new FieldElement(7n, x.modulus);
+  return x.pow(3n).add(c7);
+}
+
+/**
+ * Encode a field element as 32 bytes (big-endian).
+ */
+export function fieldElementToBytes(fe: FieldElement): Uint8Array {
+  const hex = fe.value.toString(16).padStart(64, '0'); // 32 bytes
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/**
+ * Decode a 32-byte (big-endian) array into a field element in F_p.
+ */
+export function fieldElementFromBytes(bytes: Uint8Array): FieldElement {
+  if (bytes.length !== 32) {
+    throw new Error('Expected 32 bytes for field element');
+  }
+  let v = 0n;
+  for (const b of bytes) {
+    v = (v << 8n) | BigInt(b);
+  }
+  return new FieldElement(v, STARK_PRIME);
 }

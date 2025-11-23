@@ -1,5 +1,6 @@
+// src/merkle.ts
 /**
- * Merkle Tree Implementation for zkSTARK
+ * Merkle Tree Implementation for zkSTARK-style protocols
  *
  * Merkle trees provide efficient cryptographic commitments to data,
  * allowing proofs of inclusion without revealing all data.
@@ -30,7 +31,10 @@ export class MerkleTree {
 
       for (let i = 0; i < currentLayer.length; i += 2) {
         if (i + 1 < currentLayer.length) {
-          const combined = new Uint8Array([...currentLayer[i], ...currentLayer[i + 1]]);
+          const combined = new Uint8Array([
+            ...currentLayer[i],
+            ...currentLayer[i + 1]
+          ]);
           nextLayer.push(sha256(combined));
         } else {
           nextLayer.push(currentLayer[i]);
@@ -114,14 +118,18 @@ export class MerkleProof {
       }
     }
 
-    return this.arraysEqual(currentHash, this.root);
+    return arraysEqual(currentHash, this.root);
   }
 
-  private arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) return false;
-    }
-    return true;
+  getRoot(): Uint8Array {
+    return this.root;
   }
+}
+
+function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }

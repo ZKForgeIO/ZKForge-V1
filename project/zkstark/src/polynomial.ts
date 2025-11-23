@@ -1,8 +1,9 @@
+// src/polynomial.ts
 /**
  * Polynomial Operations for zkSTARK
  *
  * Implements polynomial arithmetic over finite fields, which is essential
- * for zkSTARK proof generation and verification.
+ * for generic zkSTARK proof generation and verification.
  */
 
 import { FieldElement } from './field';
@@ -56,9 +57,7 @@ export class Polynomial {
   }
 
   add(other: Polynomial): Polynomial {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Polynomials must be over the same field');
-    }
+    this.ensureSameField(other);
 
     const maxLen = Math.max(this.coefficients.length, other.coefficients.length);
     const result: FieldElement[] = [];
@@ -73,9 +72,7 @@ export class Polynomial {
   }
 
   sub(other: Polynomial): Polynomial {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Polynomials must be over the same field');
-    }
+    this.ensureSameField(other);
 
     const maxLen = Math.max(this.coefficients.length, other.coefficients.length);
     const result: FieldElement[] = [];
@@ -90,14 +87,12 @@ export class Polynomial {
   }
 
   mul(other: Polynomial): Polynomial {
-    if (this.modulus !== other.modulus) {
-      throw new Error('Polynomials must be over the same field');
-    }
+    this.ensureSameField(other);
 
     const resultLen = this.coefficients.length + other.coefficients.length - 1;
-    const result: FieldElement[] = new Array(resultLen).fill(null).map(() =>
-      FieldElement.zero(this.modulus)
-    );
+    const result: FieldElement[] = new Array(resultLen)
+      .fill(null)
+      .map(() => FieldElement.zero(this.modulus));
 
     for (let i = 0; i < this.coefficients.length; i++) {
       for (let j = 0; j < other.coefficients.length; j++) {
@@ -113,41 +108,8 @@ export class Polynomial {
       throw new Error('Scalar must be from the same field');
     }
 
-    const result = this.coefficients.map(coef => coef.mul(scalar));
+    const result = this.coefficients.map((coef) => coef.mul(scalar));
     return new Polynomial(result);
-  }
-
-  divmod(divisor: Polynomial): [Polynomial, Polynomial] {
-    if (this.modulus !== divisor.modulus) {
-      throw new Error('Polynomials must be over the same field');
-    }
-
-    if (divisor.isZero()) {
-      throw new Error('Cannot divide by zero polynomial');
-    }
-
-    let remainder = this;
-    const quotientCoeffs: FieldElement[] = [];
-
-    while (!remainder.isZero() && remainder.degree() >= divisor.degree()) {
-      const coef = remainder.leadingCoefficient().div(divisor.leadingCoefficient());
-      const degreeDiff = remainder.degree() - divisor.degree();
-
-      const termCoeffs = new Array(degreeDiff + 1).fill(null).map((_, i) =>
-        i === degreeDiff ? coef : FieldElement.zero(this.modulus)
-      );
-      const term = new Polynomial(termCoeffs);
-
-      quotientCoeffs.push(coef);
-      remainder = remainder.sub(divisor.mul(term));
-    }
-
-    if (quotientCoeffs.length === 0) {
-      quotientCoeffs.push(FieldElement.zero(this.modulus));
-    }
-
-    const quotient = new Polynomial(quotientCoeffs.reverse());
-    return [quotient, remainder];
   }
 
   leadingCoefficient(): FieldElement {
@@ -195,11 +157,22 @@ export class Polynomial {
   }
 
   toString(): string {
-    return this.coefficients.map((c, i) => {
-      if (c.isZero()) return '';
-      const coefStr = c.value === 1n && i > 0 ? '' : c.toString();
-      const varStr = i === 0 ? '' : i === 1 ? 'x' : `x^${i}`;
-      return `${coefStr}${varStr}`;
-    }).filter(s => s).join(' + ') || '0';
+    return (
+      this.coefficients
+        .map((c, i) => {
+          if (c.isZero()) return '';
+          const coefStr = c.value === 1n && i > 0 ? '' : c.toString();
+          const varStr = i === 0 ? '' : i === 1 ? 'x' : `x^${i}`;
+          return `${coefStr}${varStr}`;
+        })
+        .filter((s) => s)
+        .join(' + ') || '0'
+    );
+  }
+
+  private ensureSameField(other: Polynomial) {
+    if (this.modulus !== other.modulus) {
+      throw new Error('Polynomials must be over the same field');
+    }
   }
 }

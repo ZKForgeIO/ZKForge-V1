@@ -7,7 +7,7 @@ import { ZKAuthService } from '../lib/zkAuth';
 import nacl from 'tweetnacl';
 import ed2curve from 'ed2curve';
 import bs58 from 'bs58';
-
+import { toast } from 'sonner';
 
 interface LoungeMessageEncrypted {
   id: string;
@@ -16,20 +16,14 @@ interface LoungeMessageEncrypted {
   ciphertext_b58: string;
   nonce_b58: string;
   sig_b58?: string;
-  sender?: {
-    username: string;
-    profile_picture_url?: string;
-  };
+  sender?: { username: string; profile_picture_url?: string };
 }
 interface LoungeMessageView {
   id: string;
   content: string;
   sender_id: string;
   created_at: string;
-  sender?: {
-    username: string;
-    profile_picture_url?: string;
-  };
+  sender?: { username: string; profile_picture_url?: string };
 }
 
 interface LoungeProps {
@@ -37,6 +31,14 @@ interface LoungeProps {
   profile: any;
   onUserClick?: (userId: string) => void;
 }
+
+// -------- toast helpers ----------
+const toastApiError = (msg?: string) =>
+  toast.error(msg || 'Something went wrong', { duration: 3500 });
+const toastWarn = (msg: string) =>
+  toast.warning(msg, { duration: 3000 });
+const toastOk = (msg: string) =>
+  toast.success(msg, { duration: 2500 });
 
 export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
   const [messages, setMessages] = useState<LoungeMessageView[]>([]);
@@ -142,8 +144,9 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
         initCooldownFromStorage();
 
         return () => { off(); stopTicker(); };
-      } catch (e) {
+      } catch (e: any) {
         console.error('[Lounge] bootstrap failed', e);
+        toastApiError(e?.message || 'Failed to initialize Lounge');
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,7 +154,10 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
 
   async function loadMessages() {
     const res = await ApiClient.get(`/lounge/messages?limit=50`);
-    if (!res?.ok) return;
+    if (!res?.ok) {
+      toastApiError(res?.error || 'Failed to load lounge messages');
+      return;
+    }
     const enc: LoungeMessageEncrypted[] = res.messages || [];
     const views: LoungeMessageView[] = [];
     for (const m of enc) {
@@ -193,7 +199,11 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
 
     const now = Date.now();
     const since = now - lastMessageTimeRef.current;
-    if (since < COOLDOWN_MS) { setCooldownRemaining(Math.ceil((COOLDOWN_MS - since) / 1000)); return; }
+    if (since < COOLDOWN_MS) {
+      setCooldownRemaining(Math.ceil((COOLDOWN_MS - since) / 1000));
+      toastWarn('Please wait before sending another message.');
+      return;
+    }
 
     try {
       await ensureRoomKey();
@@ -216,28 +226,40 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
         // rollback UI cooldown if server rejected
         setNewMessage(content);
         setCooldownRemaining(0);
+
         const msg = String(res?.error || '').toLowerCase();
+
+        // fine-grained feedback
         if (msg.includes('wait') || msg.includes('minute')) {
           const m = msg.match(/(\d+)\s*minute/);
           if (m) {
             const mins = parseInt(m[1]);
             setCooldownRemaining(mins * 60);
-            alert(`Please wait ${mins} minute(s) before sending another message.`);
+            toastWarn(`Please wait ${mins} minute(s) before sending another message.`);
           } else {
-            alert('Please wait before sending another message.');
+            toastWarn('Please wait before sending another message.');
           }
+        } else if (msg.includes('too many messages')) {
+          toastWarn('Too many messages, slow down.');
         } else if (msg.includes('limit')) {
-          alert('Message limit reached. You can send up to 100 messages per hour.');
-        } else if (msg) {
-          alert(`Failed to send message: ${res.error}`);
+          toastWarn('Message limit reached. You can send up to 100 messages per hour.');
+        } else if (msg.includes('links are not allowed')) {
+          toastWarn('Links are not allowed in the Lounge.');
+        } else if (msg.includes('message too long')) {
+          toastWarn(res.error);
+        } else if (msg.includes('duplicate')) {
+          toastWarn('Duplicate message detected.');
+        } else if (res?.error) {
+          toastApiError(res.error);
         } else {
-          alert('Failed to send message. Please try again.');
+          toastApiError('Failed to send message. Please try again.');
         }
+      } else {
+        // success: WS will render the message
       }
-      // On success the WS 'lounge:new' will arrive and render.
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to send lounge message:', err);
-      alert('Failed to send message. Please try again.');
+      toastApiError(err?.message || 'Failed to send message. Please try again.');
       setCooldownRemaining(0);
     }
   };
@@ -252,7 +274,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  // --------- UI (same as your current component; now messages[].content is decrypted) ----------
+  // --------- UI ----------
   return (
     <div className="flex flex-col h-full bg-[#0a0a0a]">
       <div
