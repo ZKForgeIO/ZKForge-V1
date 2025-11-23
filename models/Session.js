@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 const SessionSchema = new mongoose.Schema({
     _id: String,
   token: { type: String, unique: true },
-  user_id: mongoose.Types.ObjectId,
+user_id: { type: String, required: true },
   expires_at: Date,
   revoked: { type: Boolean, default: false }
 }, { versionKey: false });

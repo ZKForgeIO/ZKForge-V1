@@ -18,12 +18,12 @@ import loungeRoutes from './routes/lounge.js';
 import api404Routes from './routes/404API.js';
 
 const app = express();
-app.use(
-  cors({
-    origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://zkforge.io'],
-    credentials: true
-  })
-);
+app.set('trust proxy', true);
+app.use(cors({
+  origin: '*', // Allow all origins (note: credentials won't work with '*')
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(rateLimit({ windowMs: 60 * 1000, max: 100 }));
 app.use(express.json({ limit: '2mb' }));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
