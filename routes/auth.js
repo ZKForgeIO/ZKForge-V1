@@ -62,6 +62,15 @@ router.post('/signup', authLimiter, async (req, res) => {
       return res.status(400).json({ success: false, error: 'username required' });
     }
 
+    // Username validation to prevent NoSQL injection and enforce format
+    const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
+    if (!usernameRegex.test(username)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid username. Use 3–20 characters: letters, numbers, and underscores only.'
+      });
+    }
+
     if (await Profile.findOne({ username })) {
       return res.json({ success: false, error: 'Username already taken' });
     }
@@ -82,7 +91,7 @@ router.post('/signup', authLimiter, async (req, res) => {
       _id: id,
       username,
 
-      ed25519_public_key,       // lounge encryption
+      ed25519_public_key,          // lounge encryption
       zk_public_key: finalHashHex, // zkSTARK public commitment
       zk_auth_steps: params.steps,
       zk_auth_queries: params.queries,

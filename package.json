@@ -15,7 +15,7 @@
   "dependencies": {
     "@guildofweavers/genstark": "^0.7.0",
     "@solana/web3.js": "^1.95.3",
-    "@zkforge/zkstark": "file:project/zkstark",
+    "@zkforge/zkstark": "^1.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "ed2curve": "^0.3.0",
@@ -23,6 +23,7 @@
     "express-rate-limit": "^7.5.1",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.5.1",
+    "morgan": "^1.10.1",
     "multer": "^1.4.5-lts.1",
     "nanoid": "^5.0.7",
     "tweetnacl": "^1.0.3",

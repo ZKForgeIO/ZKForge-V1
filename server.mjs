@@ -8,6 +8,8 @@ import path from 'path';
 import jwt from 'jsonwebtoken';
 import { WebSocketServer } from 'ws';
 import rateLimit from 'express-rate-limit';
+import morgan from 'morgan';
+
 
 import authRoutes from './routes/auth.js';
 import profileRoutes from './routes/profiles.js';
@@ -19,6 +21,10 @@ import api404Routes from './routes/404API.js';
 
 const app = express();
 app.set('trust proxy', 1); // ✅ safer than true
+
+// Request logging middleware (security/debug visibility)
+app.use(morgan('combined'));
+
 app.use(cors({
   origin: '*', // Allow all origins (note: credentials won't work with '*')
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -57,11 +63,22 @@ const io = {
   }
 };
 
+// WebSocket authentication using subprotocol instead of query string
 wss.on('connection', (ws, req) => {
   try {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const token = qs.get('token') || '';
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    // Client should connect with: new WebSocket('ws://host/ws', token)
+    const protocolHeader = req.headers['sec-websocket-protocol'];
+    const token = Array.isArray(protocolHeader) ? protocolHeader[0] : protocolHeader;
+
+    if (!token) {
+      ws.close(1008, 'unauthorized');
+      return;
+    }
+
+    const payload = jwt.verify(token, process.env.JWT_SECRET, {
+      algorithms: ['HS256']
+    });
+
     ws.userId = payload.uid;
   } catch {
     ws.close(1008, 'unauthorized');
@@ -94,7 +111,7 @@ async function start() {
   await mongoose.connect(process.env.MONGO_URI, { dbName: 'zkchat' });
   server.listen(process.env.PORT, () => {
     console.log(`HTTP http://localhost:${process.env.PORT}`);
-    console.log(`WS   ws://localhost:${process.env.PORT}/ws?token=<JWT>`);
+    console.log(`WS   ws://localhost:${process.env.PORT}/ws (token via subprotocol)`);
   });
 }
 start();

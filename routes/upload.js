@@ -13,7 +13,6 @@
 
 // Due to size limits and clarity, I will update each affected file separately
 // Beginning with: routes/upload.js
-
 // 1. routes/upload.js (Path traversal mitigation)
 import express from 'express';
 import multer from 'multer';
@@ -22,6 +21,13 @@ import fs from 'fs';
 import { authMiddleware } from '../lib/auth.js';
 
 const router = express.Router();
+
+// Validate PUBLIC_BASE_URL on startup
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
+if (!PUBLIC_BASE_URL) {
+  throw new Error('PUBLIC_BASE_URL required');
+}
+
 const uploadDir = path.join(process.cwd(), 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -47,12 +53,8 @@ const upload = multer({
 });
 
 router.post('/profile-picture', authMiddleware, upload.single('file'), (req, res) => {
-  const url = `${process.env.PUBLIC_BASE_URL}/uploads/${req.file.filename}`;
+  const url = `${PUBLIC_BASE_URL}/uploads/${req.file.filename}`;
   res.json({ ok: true, url });
 });
 
 export default router;
-
-// 
-// Next file to be fixed: routes/transactions.js for secure hash
-//
