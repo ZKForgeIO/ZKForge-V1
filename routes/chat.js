@@ -85,7 +85,7 @@ async function ensureEd25519(profile) {
       console.log('[chat] migrated Ed25519 key for user:', profile._id);
       return maybePub;
     }
-  } catch {}
+  } catch { }
 
   return null;
 }
@@ -242,13 +242,13 @@ export default function chatRouter(io) {
           updated_at: c.updated_at,
           last_message: last[0]
             ? {
-                id: last[0]._id,
-                sender_id: last[0].sender_id,
-                created_at: last[0].created_at,
-                ciphertext_b58: last[0].ciphertext_b58,
-                nonce_b58: last[0].nonce_b58,
-                sig_b58: last[0].sig_b58
-              }
+              id: last[0]._id,
+              sender_id: last[0].sender_id,
+              created_at: last[0].created_at,
+              ciphertext_b58: last[0].ciphertext_b58,
+              nonce_b58: last[0].nonce_b58,
+              sig_b58: last[0].sig_b58
+            }
             : undefined,
           other_user
         };
@@ -371,6 +371,16 @@ export default function chatRouter(io) {
       /* ----------------------------------------------
          Anti-spam: burst limit + duplicate protection
       ---------------------------------------------- */
+      // Check for nonce reuse (Critical Security Fix)
+      const existingNonce = await Message.findOne({
+        conversation_id: conversationId,
+        nonce_b58: nonce_b58
+      });
+
+      if (existingNonce) {
+        return res.status(409).json({ ok: false, error: 'Nonce reuse detected' });
+      }
+
       const burstSince = new Date(Date.now() - 10_000);
       const burstCount = await Message.countDocuments({
         conversation_id: conversationId,
@@ -408,7 +418,7 @@ export default function chatRouter(io) {
                 .json({ ok: false, error: 'Duplicate message' });
             }
           }
-        } catch {}
+        } catch { }
       }
 
       /* ----------------------------------------------
@@ -443,10 +453,10 @@ export default function chatRouter(io) {
         sig_b58,
         sender: senderProfile
           ? {
-              username: senderProfile.username,
-              profile_picture_url:
-                senderProfile.profile_picture_url || undefined
-            }
+            username: senderProfile.username,
+            profile_picture_url:
+              senderProfile.profile_picture_url || undefined
+          }
           : undefined
       };
 

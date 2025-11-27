@@ -61,8 +61,12 @@ export default function makeLoungeRouter(io) {
   const router = express.Router();
 
   // ---- Room key ----
-  const ROOM_KEY_B58 =
-    process.env.LOUNGE_ROOM_KEY_B58 || bs58.encode(nacl.randomBytes(32));
+  // ---- Room key ----
+  if (!process.env.LOUNGE_ROOM_KEY_B58) {
+    console.error('FATAL: LOUNGE_ROOM_KEY_B58 not set in environment.');
+    process.exit(1);
+  }
+  const ROOM_KEY_B58 = process.env.LOUNGE_ROOM_KEY_B58;
   console.log('[Lounge] ROOM_KEY_B58 loaded');
   const ROOM_KEY = bs58.decode(ROOM_KEY_B58);
 
@@ -165,10 +169,10 @@ export default function makeLoungeRouter(io) {
         sig_b58: r.sig_b58 || undefined,
         sender: map[r.sender_id]
           ? {
-              username: map[r.sender_id].username,
-              profile_picture_url:
-                map[r.sender_id].profile_picture_url || undefined
-            }
+            username: map[r.sender_id].username,
+            profile_picture_url:
+              map[r.sender_id].profile_picture_url || undefined
+          }
           : undefined
       }))
       .reverse();
@@ -270,9 +274,9 @@ export default function makeLoungeRouter(io) {
         sig_b58: doc.sig_b58 || undefined,
         sender: me
           ? {
-              username: me.username,
-              profile_picture_url: me.profile_picture_url || undefined
-            }
+            username: me.username,
+            profile_picture_url: me.profile_picture_url || undefined
+          }
           : undefined
       };
 

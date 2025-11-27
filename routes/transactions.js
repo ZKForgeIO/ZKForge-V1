@@ -39,6 +39,29 @@ router.post('/send', authMiddleware, async (req, res) => {
     if (!me?.solana_address) return res.status(400).json({ ok: false, error: 'Sender wallet not set' });
 
     const toAddress = toProfile?.solana_address || recipient;
+
+    // --- Balance Validation ---
+    // Calculate total received
+    const received = await Transaction.aggregate([
+      { $match: { user_id: req.userId, type: 'receive', status: 'completed' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const totalReceived = received[0]?.total || 0;
+
+    // Calculate total sent
+    const sent = await Transaction.aggregate([
+      { $match: { user_id: req.userId, type: 'send', status: 'completed' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const totalSent = sent[0]?.total || 0;
+
+    const currentBalance = totalReceived - totalSent;
+
+    if (currentBalance < value) {
+      return res.status(400).json({ ok: false, error: 'Insufficient funds' });
+    }
+    // --------------------------
+
     const challenge = `send:${req.userId}:${toAddress}:${value}:${Date.now()}`;
     const hashBuffer = crypto.createHash('sha256').update(challenge).digest();
     const txHash = '0x' + hashBuffer.toString('hex');

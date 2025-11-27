@@ -18,7 +18,16 @@ import {
   DEFAULT_QUERIES
 } from '../lib/zkAuth.js';
 
+import rateLimit from 'express-rate-limit';
+
 const router = express.Router();
+
+// Rate limiter: 5 attempts per 15 minutes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  message: { success: false, error: 'Too many login attempts, please try again later' }
+});
 
 // -----------------
 // Auto-migrate helper
@@ -46,7 +55,7 @@ async function ensureEd25519Key(profile) {
 }
 
 // --- SIGNUP ---
-router.post('/signup', async (req, res) => {
+router.post('/signup', authLimiter, async (req, res) => {
   try {
     const { username } = req.body || {};
     if (!username) {
@@ -128,7 +137,7 @@ router.post('/signup', async (req, res) => {
 });
 
 // --- SIGNIN (zkSTARK-based)
-router.post('/signin', async (req, res) => {
+router.post('/signin', authLimiter, async (req, res) => {
   try {
     const { username, zkSecretKey } = req.body || {};
 
