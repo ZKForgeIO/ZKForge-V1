@@ -56,34 +56,39 @@ export default function Username() {
     }
   };
 
-const handleDownloadKeys = () => {
-  // ensure we always write the canonical 0x + 128-hex
-  const normalizedZK = ZKAuthService.normalizeTo0xHex(zkSecretKey || '');
-  const zkPublicKey = ZKAuthService.derivePublicKeyFromSecret(normalizedZK);
+  const handleDownloadKeys = () => {
+    // ensure we always write the canonical 0x + 128-hex
+    const normalizedZK = ZKAuthService.normalizeTo0xHex(zkSecretKey || '');
+    const zkPublicKey = ZKAuthService.derivePublicKeyFromSecret(normalizedZK);
 
-  const keysData = {
-    username,
-    zkSecretKey: normalizedZK,              // <- canonical format
-    zkPublicKey,                            // base58 (handy for verification)
-    solanaAddress,
-    createdAt: new Date().toISOString(),
-    format: '0x + 128-hex (64-byte expanded Ed25519 secret)', // doc
-    version: 1,
-    warning:
-      'KEEP THIS FILE SECURE! Your ZK secret key is the only way to access your account.',
+    const keysData = {
+      username,
+      zkSecretKey: normalizedZK,              // <- canonical format
+      zkPublicKey,                            // base58 (handy for verification)
+      solanaAddress,
+      createdAt: new Date().toISOString(),
+      format: '0x + 128-hex (64-byte expanded Ed25519 secret)', // doc
+      version: 1,
+      warning:
+        'KEEP THIS FILE SECURE! Your ZK secret key is the only way to access your account.',
+    };
+
+    const blob = new Blob([JSON.stringify(keysData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `zkforge-keys-${username}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
-  const blob = new Blob([JSON.stringify(keysData, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `zkforge-keys-${username}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-};
 
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+
+  // ... (existing useEffect)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,6 +108,15 @@ const handleDownloadKeys = () => {
       return;
     }
 
+    if (!password) {
+      setError('Password is required for encryption');
+      return;
+    }
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
+
     const correctAnswer = captchaNum1 + captchaNum2;
     const userAnswer = parseInt(captchaAnswer);
 
@@ -117,13 +131,14 @@ const handleDownloadKeys = () => {
     setError('');
 
     try {
-      const result = await AuthService.signUp(username);
+      const result = await AuthService.signUp(username, password);
 
       if (result.success) {
+        sessionStorage.setItem('encryption_password', password);
         const normalized = ZKAuthService.normalizeTo0xHex(result.zkSecretKey || '');
-  setZkSecretKey(normalized);
-  setSolanaAddress(result.solanaAddress || '');
-  setShowKeys(true);
+        setZkSecretKey(normalized);
+        setSolanaAddress(result.solanaAddress || '');
+        setShowKeys(true);
       } else {
         setError(result.error || 'Failed to create account');
       }
@@ -304,6 +319,40 @@ const handleDownloadKeys = () => {
               </div>
 
               <div>
+                <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-2">
+                  Encryption Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="password"
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    placeholder="Create a password to encrypt your keys"
+                    className="w-full px-4 py-3 pr-12 bg-[#0f0f0f] border border-[#2a2a2a] rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-[#17ff9a] focus:ring-2 focus:ring-[#17ff9a]/20 transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-[#17ff9a] transition-colors"
+                  >
+                    {showPassword ? (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-gray-500">Min 6 chars. You will need this to sign in.</p>
+              </div>
+
+              <div>
                 <label htmlFor="captcha" className="block text-sm font-medium text-gray-300 mb-2">
                   Security Check
                 </label>
@@ -335,11 +384,10 @@ const handleDownloadKeys = () => {
                   }}
                   required
                   placeholder="Enter your answer"
-                  className={`w-full px-4 py-3 bg-[#0f0f0f] border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-all ${
-                    captchaError
-                      ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
-                      : 'border-[#2a2a2a] focus:border-[#17ff9a] focus:ring-[#17ff9a]/20'
-                  }`}
+                  className={`w-full px-4 py-3 bg-[#0f0f0f] border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-all ${captchaError
+                    ? 'border-red-500 focus:border-red-500 focus:ring-red-500/20'
+                    : 'border-[#2a2a2a] focus:border-[#17ff9a] focus:ring-[#17ff9a]/20'
+                    }`}
                 />
                 <p className="mt-2 text-xs text-gray-500">Solve the math problem to verify you're human</p>
               </div>

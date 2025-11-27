@@ -1,6 +1,7 @@
 import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { EncryptionService } from './encryption';
 
 export interface SolanaWalletData {
   publicKey: string;
@@ -110,21 +111,21 @@ export class WalletStorage {
   private static readonly WALLET_KEY = 'solana_wallet_data';
   private static readonly ENCRYPTED_WALLET_KEY = 'encrypted_wallet_data';
 
-  static saveWallet(walletData: SolanaWalletData): void {
+  static async saveWallet(walletData: SolanaWalletData, password: string): Promise<void> {
     try {
-      const encrypted = btoa(JSON.stringify(walletData));
+      const encrypted = await EncryptionService.encrypt(JSON.stringify(walletData), password);
       localStorage.setItem(this.ENCRYPTED_WALLET_KEY, encrypted);
     } catch (error) {
       console.error('Failed to save wallet:', error);
     }
   }
 
-  static getWallet(): SolanaWalletData | null {
+  static async getWallet(password: string): Promise<SolanaWalletData | null> {
     try {
       const encrypted = localStorage.getItem(this.ENCRYPTED_WALLET_KEY);
       if (!encrypted) return null;
 
-      const decrypted = atob(encrypted);
+      const decrypted = await EncryptionService.decrypt(encrypted, password);
       return JSON.parse(decrypted) as SolanaWalletData;
     } catch (error) {
       console.error('Failed to get wallet:', error);
@@ -142,7 +143,7 @@ export class WalletStorage {
   }
 
   static hasWallet(): boolean {
-    return this.getWallet() !== null;
+    return localStorage.getItem(this.ENCRYPTED_WALLET_KEY) !== null;
   }
 
   static savePublicInfo(address: string): void {

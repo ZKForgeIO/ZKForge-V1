@@ -78,7 +78,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
           setSearchResults([]);
         }
       } catch (error) {
-        console.error('Search failed:', error);
+        if (import.meta.env.DEV) console.error('Search failed:', error);
         setSearchResults([]);
       } finally {
         setSearchingRecipient(false);
@@ -95,18 +95,28 @@ export default function Wallet({ userId, profile }: WalletProps) {
   }, [showReceiveModal, walletData]);
 
   const loadWallet = async () => {
-    let wallet = WalletStorage.getWallet();
+    const pwd = sessionStorage.getItem('encryption_password');
+    if (!pwd) {
+      // If no password, we can't load the wallet.
+      // We might want to prompt the user or just fail gracefully?
+      // Since this is a component, we can't easily prompt.
+      // We'll rely on the fact that they should be logged in with a password.
+      if (import.meta.env.DEV) console.error('No encryption password found');
+      return;
+    }
+
+    let wallet = await WalletStorage.getWallet(pwd);
 
     if (!wallet) {
-      const zkSecretKey = AuthStorage.getSecretKey?.();
+      const zkSecretKey = await AuthStorage.getSecretKey(pwd);
       if (zkSecretKey) {
         try {
           wallet = SolanaWalletService.deriveWalletFromZKSecret(zkSecretKey);
-          WalletStorage.saveWallet(wallet);
+          await WalletStorage.saveWallet(wallet, pwd);
           WalletStorage.savePublicInfo(wallet.publicKey);
           // (optional) You can update profile.solana_address on backend if you add support in PATCH /profiles
         } catch (error) {
-          console.error('Failed to regenerate wallet from ZK secret:', error);
+          if (import.meta.env.DEV) console.error('Failed to regenerate wallet from ZK secret:', error);
         }
       }
     }
@@ -135,7 +145,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
         setTransactions([]);
       }
     } catch (error) {
-      console.error('Failed to load transactions:', error);
+      if (import.meta.env.DEV) console.error('Failed to load transactions:', error);
     } finally {
       setLoadingTransactions(false);
     }
@@ -168,7 +178,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
         setTimeout(() => setCopied(false), 2000);
       }
     } catch (error) {
-      console.error('Failed to copy:', error);
+      if (import.meta.env.DEV) console.error('Failed to copy:', error);
     }
   };
 
@@ -181,7 +191,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
         color: { dark: '#000000', light: '#FFFFFF' },
       });
     } catch (error) {
-      console.error('Failed to generate QR code:', error);
+      if (import.meta.env.DEV) console.error('Failed to generate QR code:', error);
     }
   };
 
@@ -221,7 +231,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
       setSearchResults([]);
       setShowSearchResults(false);
     } catch (error) {
-      console.error('Send transaction failed:', error);
+      if (import.meta.env.DEV) console.error('Send transaction failed:', error);
       alert('Transaction failed. Please try again.');
     } finally {
       setSending(false);
@@ -237,7 +247,12 @@ export default function Wallet({ userId, profile }: WalletProps) {
   };
 
   const handleRegenerateWallet = async () => {
-    const zkSecretKey = AuthStorage.getSecretKey?.();
+    const pwd = sessionStorage.getItem('encryption_password');
+    if (!pwd) {
+      alert('Session expired. Please sign in again.');
+      return;
+    }
+    const zkSecretKey = await AuthStorage.getSecretKey(pwd);
     if (!zkSecretKey) {
       alert('No ZK secret key found. Please sign in again.');
       return;
@@ -245,7 +260,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
 
     try {
       const wallet = SolanaWalletService.deriveWalletFromZKSecret(zkSecretKey);
-      WalletStorage.saveWallet(wallet);
+      await WalletStorage.saveWallet(wallet, pwd);
       WalletStorage.savePublicInfo(wallet.publicKey);
 
       // (optional) If backend supports it, update solana_address:
@@ -253,7 +268,7 @@ export default function Wallet({ userId, profile }: WalletProps) {
 
       setWalletData(wallet);
     } catch (error) {
-      console.error('Failed to regenerate wallet:', error);
+      if (import.meta.env.DEV) console.error('Failed to regenerate wallet:', error);
       alert('Failed to regenerate wallet. Please try signing in again.');
     }
   };
@@ -397,11 +412,10 @@ export default function Wallet({ userId, profile }: WalletProps) {
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                      tx.type === 'receive'
-                        ? 'bg-green-500/10 border border-green-500/20'
-                        : 'bg-orange-500/10 border border-orange-500/20'
-                    }`}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${tx.type === 'receive'
+                      ? 'bg-green-500/10 border border-green-500/20'
+                      : 'bg-orange-500/10 border border-orange-500/20'
+                      }`}>
                       {tx.type === 'receive' ? (
                         <ArrowDownLeft className="w-5 h-5 text-green-400" />
                       ) : (
@@ -434,9 +448,8 @@ export default function Wallet({ userId, profile }: WalletProps) {
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className={`text-base font-bold ${
-                      tx.type === 'receive' ? 'text-green-400' : 'text-white'
-                    }`}>
+                    <div className={`text-base font-bold ${tx.type === 'receive' ? 'text-green-400' : 'text-white'
+                      }`}>
                       {tx.type === 'receive' ? '+' : '-'}${Number(tx.amount).toFixed(2)}
                     </div>
                     <div className="text-xs text-gray-500">{tx.currency}</div>

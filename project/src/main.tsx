@@ -24,7 +24,7 @@ createRoot(document.getElementById('root')!).render(
     <Toaster position="top-center" richColors closeButton theme="dark" expand />
       <Routes>
         {/* <Route path="/" element={<Landing />} /> */}
-        {/* <Route path="/dapp/auth" element={<Auth />} /> */}
+        <Route path="/dapp/auth" element={<Auth />} />
         <Route path="/" element={<Auth />} />
         <Route path="/dapp/username" element={<Username />} />
         <Route path="/dapp/chat" element={<Chat />} />

@@ -18,7 +18,7 @@ import loungeRoutes from './routes/lounge.js';
 import api404Routes from './routes/404API.js';
 
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 1); // ✅ safer than true
 app.use(cors({
   origin: '*', // Allow all origins (note: credentials won't work with '*')
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],

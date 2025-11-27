@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Send, Menu, LogOut, MessageCircle, X, Settings, Users,
-  Wallet as WalletIcon, Compass,Zap
+  Wallet as WalletIcon, Compass, Zap
 } from 'lucide-react';
 
 import { AuthService, ApiClient, AuthStorage } from '../lib/authService';
@@ -115,15 +115,31 @@ export default function Chat() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   // my ed25519 pair (from expanded 64-byte secret in storage)
+  // my ed25519 pair (from expanded 64-byte secret in storage)
   const edPairRef = useRef<nacl.SignKeyPair | null>(null);
-  function getEdPair(): nacl.SignKeyPair {
-    if (edPairRef.current) return edPairRef.current;
-    const zk = AuthStorage.getSecretKey();
-    if (!zk) throw new Error('Missing ZK secret key in storage');
+
+  async function loadEdPair() {
+    if (edPairRef.current) return;
+    const pwd = sessionStorage.getItem('encryption_password');
+    if (!pwd) {
+      toastWarn('Session expired or password missing. Please sign in again.');
+      navigate('/dapp/auth');
+      return;
+    }
+    const zk = await AuthStorage.getSecretKey(pwd);
+    if (!zk) {
+      toastWarn('Failed to decrypt keys. Please sign in again.');
+      navigate('/dapp/auth');
+      return;
+    }
     const sk = ZKAuthService.parseSecretKey(zk); // Uint8Array(64)
     const pair = nacl.sign.keyPair.fromSecretKey(sk);
     edPairRef.current = pair;
-    return pair;
+  }
+
+  function getEdPair(): nacl.SignKeyPair {
+    if (edPairRef.current) return edPairRef.current;
+    throw new Error('EdPair not loaded yet');
   }
 
   // --------- convo key fetching/unsealing (mirror Lounge) ----------
@@ -133,10 +149,10 @@ export default function Chat() {
       return cached;
     }
 
-    console.debug('[DM conv-key] fetch envelope', { conversationId });
+    if (import.meta.env.DEV) console.debug('[DM conv-key] fetch envelope', { conversationId });
     const resp = await ApiClient.get(`/chat/conv-key?conversationId=${encodeURIComponent(conversationId)}`);
     if (!resp?.ok) {
-      console.error('[DM conv-key] server error', resp?.error);
+      if (import.meta.env.DEV) console.error('[DM conv-key] server error', resp?.error);
       throw new Error(resp?.error || 'failed to fetch conversation key');
     }
 
@@ -148,11 +164,11 @@ export default function Chat() {
       n = bs58.decode(nonce);
       sealedBytes = bs58.decode(sealed);
     } catch (e) {
-      console.error('[DM conv-key] b58 decode failed', e);
+      if (import.meta.env.DEV) console.error('[DM conv-key] b58 decode failed', e);
       throw new Error('failed to decode conv key envelope');
     }
 
-    console.debug('[DM conv-key] envelope sizes', {
+    if (import.meta.env.DEV) console.debug('[DM conv-key] envelope sizes', {
       ephPubLen: theirPubCurve.length,
       nonceLen: n.length,
       sealedLen: sealedBytes.length
@@ -165,25 +181,28 @@ export default function Chat() {
     }
 
     // Derive curve secret EXACTLY like Lounge
-    const zkSecret = AuthStorage.getSecretKey();
+    // Derive curve secret EXACTLY like Lounge
+    const pwd = sessionStorage.getItem('encryption_password');
+    if (!pwd) throw new Error('No encryption password in session');
+    const zkSecret = await AuthStorage.getSecretKey(pwd);
     if (!zkSecret) throw new Error('no zk secret in storage');
     const edSecret64 = ZKAuthService.parseSecretKey(zkSecret); // 64B expanded
     const edPair = nacl.sign.keyPair.fromSecretKey(edSecret64);
     const curveSecret = ed2curve.convertSecretKey(edPair.secretKey);
 
     if (!is32(curveSecret)) {
-      console.error('[DM conv-key] ed2curve conversion failed');
+      if (import.meta.env.DEV) console.error('[DM conv-key] ed2curve conversion failed');
       throw new Error('failed to derive curve secret');
     }
 
     const roomKey = nacl.box.open(sealedBytes, n, theirPubCurve, curveSecret as Uint8Array);
     if (!roomKey || !is32(roomKey)) {
-      console.error('[DM conv-key] nacl.box.open failed');
+      if (import.meta.env.DEV) console.error('[DM conv-key] nacl.box.open failed');
       throw new Error('failed to unseal conversation key');
     }
 
     cacheConvKey(conversationId, roomKey);
-    console.debug('[DM conv-key] unsealed OK', { conversationId, keyLen: roomKey.length });
+    if (import.meta.env.DEV) console.debug('[DM conv-key] unsealed OK', { conversationId, keyLen: roomKey.length });
     return roomKey;
   }
 
@@ -217,13 +236,13 @@ export default function Chat() {
       nonce = bs58.decode(nonce_b58);
       ct = bs58.decode(ciphertext_b58);
     } catch (e) {
-      console.warn('[DM decrypt] base58 decode error', e);
+      if (import.meta.env.DEV) console.warn('[DM decrypt] base58 decode error', e);
       return null;
     }
     if (!is24(nonce)) return null;
     const opened = nacl.secretbox.open(ct, nonce, key as Uint8Array);
     if (!opened) {
-      console.warn('[DM decrypt] secretbox.open failed');
+      if (import.meta.env.DEV) console.warn('[DM decrypt] secretbox.open failed');
       return null;
     }
     return new TextDecoder().decode(opened);
@@ -253,6 +272,8 @@ export default function Chat() {
       setUser({ id: cur.userId! });
       setProfile({ id: cur.userId!, username: cur.username!, profile_picture_url: '', is_online: true });
 
+      await loadEdPair();
+
       // Load conversations
       await loadConversations();
 
@@ -261,7 +282,7 @@ export default function Chat() {
         try {
           // Ensure key best-effort
           await ensureConvKey(m.conversation_id).catch((e) => {
-            console.warn('[WS message:new] ensureConvKey failed (will retry on open)', e);
+            if (import.meta.env.DEV) console.warn('[WS message:new] ensureConvKey failed (will retry on open)', e);
           });
           const text = decryptForConversationById(m.conversation_id, m.nonce_b58, m.ciphertext_b58);
           if (!text) return;
@@ -284,7 +305,7 @@ export default function Chat() {
 
           bumpConversationPreview(m, text);
         } catch (e) {
-          console.warn('[WS message:new] unable to decrypt yet', e);
+          if (import.meta.env.DEV) console.warn('[WS message:new] unable to decrypt yet', e);
         }
       });
 
@@ -320,7 +341,7 @@ export default function Chat() {
       const t = decryptForConversationById(conv.id, conv.last_message.nonce_b58, conv.last_message.ciphertext_b58);
       return t || 'Encrypted message';
     } catch (e) {
-      console.warn('[DM preview] decrypt failed', e);
+      if (import.meta.env.DEV) console.warn('[DM preview] decrypt failed', e);
       return 'Encrypted message';
     }
   }
@@ -373,7 +394,7 @@ export default function Chat() {
         setIsUserAtBottom(true);
         setTimeout(() => scrollToBottom(), 30);
       } catch (e) {
-        console.error('load messages failed', e);
+        if (import.meta.env.DEV) console.error('load messages failed', e);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -394,7 +415,7 @@ export default function Chat() {
       setPendingDmUserId(null);
       setPendingDmUserProfile(null);
       // try prefetching key (best-effort)
-      try { await ensureConvKey(convId); } catch (e) { console.debug('[startConversation] ensureConvKey failed (will retry on open)', e); }
+      try { await ensureConvKey(convId); } catch (e) { if (import.meta.env.DEV) console.debug('[startConversation] ensureConvKey failed (will retry on open)', e); }
       await loadConversations();
     }
   }
@@ -443,7 +464,7 @@ export default function Chat() {
       // WS will add exactly one copy
       setTimeout(() => scrollToBottom(), 20);
     } catch (err) {
-      console.error('sendMessage failed', err);
+      if (import.meta.env.DEV) console.error('sendMessage failed', err);
       toastApiError('Failed to send message');
     }
   }
@@ -547,7 +568,7 @@ export default function Chat() {
               <button
                 onClick={() => setShowMenu(!showMenu)}
                 className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 active:scale-95 ${showMenu ? 'bg-gradient-to-br from-[#17ff9a] to-[#10b981] text-black shadow-lg shadow-[#17ff9a]/20'
-                    : 'bg-[#1a1a1a] text-gray-400 hover:text-[#17ff9a] hover:bg-[#1f1f1f]'
+                  : 'bg-[#1a1a1a] text-gray-400 hover:text-[#17ff9a] hover:bg-[#1f1f1f]'
                   }`}
               >
                 <Menu className="w-5 h-5" />

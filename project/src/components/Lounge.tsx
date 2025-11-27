@@ -59,14 +59,21 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
   const edPairRef = useRef<nacl.SignKeyPair | null>(null);
 
   // --------- helpers: keying & crypto ----------
-  function getEdPairFromStorage(): nacl.SignKeyPair {
-    if (edPairRef.current) return edPairRef.current;
-    const zk = AuthStorage.getSecretKey();
-    if (!zk) throw new Error('Missing ZK secret key');
+  // --------- helpers: keying & crypto ----------
+  async function loadEdPair() {
+    if (edPairRef.current) return;
+    const pwd = sessionStorage.getItem('encryption_password');
+    if (!pwd) return; // Silent fail, will be caught by ensureRoomKey check
+    const zk = await AuthStorage.getSecretKey(pwd);
+    if (!zk) return;
     const sk = ZKAuthService.parseSecretKey(zk); // Uint8Array(64) expanded
     const pair = nacl.sign.keyPair.fromSecretKey(sk);
     edPairRef.current = pair;
-    return pair;
+  }
+
+  function getEdPair(): nacl.SignKeyPair {
+    if (edPairRef.current) return edPairRef.current;
+    throw new Error('Keys not loaded');
   }
 
   async function ensureRoomKey() {
@@ -74,7 +81,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
     const r = await ApiClient.get('/lounge/key');
     if (!r?.ok) throw new Error(r?.error || 'failed to fetch lounge key');
 
-    const edPair = getEdPairFromStorage();
+    const edPair = getEdPair();
     const curveSk = ed2curve.convertSecretKey(edPair.secretKey);
     if (!curveSk) throw new Error('ed2curve conversion failed');
 
@@ -107,7 +114,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
   }
 
   function signNonceCipher(nonce: Uint8Array, ct: Uint8Array) {
-    const ed = getEdPairFromStorage();
+    const ed = getEdPair();
     const data = new Uint8Array(nonce.length + ct.length);
     data.set(nonce, 0); data.set(ct, nonce.length);
     return nacl.sign.detached(data, ed.secretKey);
@@ -117,6 +124,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
   useEffect(() => {
     (async () => {
       try {
+        await loadEdPair();
         await ensureRoomKey();
         await loadMessages();
 
@@ -145,7 +153,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
 
         return () => { off(); stopTicker(); };
       } catch (e: any) {
-        console.error('[Lounge] bootstrap failed', e);
+        if (import.meta.env.DEV) console.error('[Lounge] bootstrap failed', e);
         toastApiError(e?.message || 'Failed to initialize Lounge');
       }
     })();
@@ -258,7 +266,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
         // success: WS will render the message
       }
     } catch (err: any) {
-      console.error('Failed to send lounge message:', err);
+      if (import.meta.env.DEV) console.error('Failed to send lounge message:', err);
       toastApiError(err?.message || 'Failed to send message. Please try again.');
       setCooldownRemaining(0);
     }
@@ -376,11 +384,10 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
                 maxLength={300}
                 className="w-full px-4 py-3 pr-16 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl text-white text-sm placeholder-gray-500 focus:outline-none focus:border-[#17ff9a] focus:ring-2 focus:ring-[#17ff9a]/20 transition-all"
               />
-              <div className={`absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium ${
-                newMessage.length >= 290 ? 'text-orange-400'
-                  : newMessage.length === 300 ? 'text-red-400'
+              <div className={`absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium ${newMessage.length >= 290 ? 'text-orange-400'
+                : newMessage.length === 300 ? 'text-red-400'
                   : 'text-gray-500'
-              }`}>
+                }`}>
                 {newMessage.length}/300
               </div>
             </div>
