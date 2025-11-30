@@ -16,6 +16,7 @@ interface LoungeMessageEncrypted {
   ciphertext_b58: string;
   nonce_b58: string;
   sig_b58?: string;
+  key_version?: number;
   sender?: { username: string; profile_picture_url?: string };
 }
 interface LoungeMessageView {
@@ -55,7 +56,9 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
   const STORAGE_KEY = `lounge_last_message_${userId}`;
 
   // --- Room key kept only in memory ---
-  const roomKeyRef = useRef<Uint8Array | null>(null);
+  const roomKeysRef = useRef<Map<number, Uint8Array>>(new Map());
+  const [latestKeyVersion, setLatestKeyVersion] = useState<number>(1);
+  const [hasKeys, setHasKeys] = useState(false);
   const edPairRef = useRef<nacl.SignKeyPair | null>(null);
 
   // --------- helpers: keying & crypto ----------
@@ -77,39 +80,70 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
   }
 
   async function ensureRoomKey() {
-    if (roomKeyRef.current) return;
+    // if (roomKeyRef.current) return; // Removed as we now manage multiple keys in a map
     const r = await ApiClient.get('/lounge/key');
-    if (!r?.ok) throw new Error(r?.error || 'failed to fetch lounge key');
+    // Backward compatibility: check both 'success' (new) and 'ok' (old) fields
+    const isSuccess = r?.success || r?.ok;
+    if (!isSuccess) throw new Error(r?.error || 'failed to fetch lounge key');
 
     const edPair = getEdPair();
     const curveSk = ed2curve.convertSecretKey(edPair.secretKey);
-    if (!curveSk) throw new Error('ed2curve conversion failed');
+    if (!curveSk) throw new Error('failed to derive curve sk');
 
     const ephPub = bs58.decode(r.ephPub);
     const nonce = bs58.decode(r.nonce);
-    const sealed = bs58.decode(r.sealed);
 
-    const k = nacl.box.open(sealed, nonce, ephPub, curveSk);
-    if (!k) throw new Error('failed to unseal room key');
-    if (k.length !== 32) throw new Error('bad room key size');
+    // New format: r.keys is array of { version, sealed }
+    // Fallback: r.sealed (old format, version=1 or 2 implicit)
+    const keysToProcess = r.keys || [{ version: r.version || 1, sealed: r.sealed }];
 
-    roomKeyRef.current = new Uint8Array(k);
+    const map = new Map<number, Uint8Array>();
+    let maxVer = 0;
+
+    for (const k of keysToProcess) {
+      const sealed = bs58.decode(k.sealed);
+      const opened = nacl.box.open(sealed, nonce, ephPub, curveSk);
+      if (opened) {
+        map.set(k.version, opened);
+        if (k.version > maxVer) maxVer = k.version;
+      }
+    }
+
+    if (map.size === 0) throw new Error('failed to decrypt any lounge keys');
+
+    roomKeysRef.current = map;
+    setLatestKeyVersion(maxVer);
+    setHasKeys(true);
+    console.log(`[Lounge] Loaded ${map.size} keys, latest=${maxVer}`);
   }
 
   function decryptMessage(m: LoungeMessageEncrypted): string | null {
-    const k = roomKeyRef.current; if (!k) return null;
-    const nonce = bs58.decode(m.nonce_b58);
+    const version = m.key_version || 1;
+    const key = roomKeysRef.current.get(version);
+
+    if (!key) {
+      console.warn(`[Lounge] No key found for version ${version}`);
+      return null;
+    }
+
     const ct = bs58.decode(m.ciphertext_b58);
-    const out = nacl.secretbox.open(ct, nonce, k);
-    if (!out) return null;
-    return new TextDecoder().decode(out);
+    const nonce = bs58.decode(m.nonce_b58);
+    const opened = nacl.secretbox.open(ct, nonce, key);
+    if (!opened) {
+      console.warn(`[Lounge] Failed to decrypt message ${m.id} with key version ${version}`);
+      return null;
+    }
+    return new TextDecoder().decode(opened);
   }
 
   function encryptMessage(plain: string) {
-    const k = roomKeyRef.current; if (!k) throw new Error('room key not ready');
+    if (!hasKeys) throw new Error('room keys not ready');
+    const key = roomKeysRef.current.get(latestKeyVersion);
+    if (!key) throw new Error('no room key for latest version');
+
     const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
     const msg = new TextEncoder().encode(plain);
-    const ct = nacl.secretbox(msg, nonce, k);
+    const ct = nacl.secretbox(msg, nonce, key);
     return { nonce, ct };
   }
 
@@ -126,7 +160,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
       try {
         await loadEdPair();
         await ensureRoomKey();
-        await loadMessages();
+        // loadMessages now happens after ensureRoomKey completes
 
         const off = WSClient.on('lounge:new', (m: LoungeMessageEncrypted) => {
           const text = decryptMessage(m);
@@ -160,9 +194,18 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Load messages when keys become available
+  useEffect(() => {
+    if (hasKeys) {
+      loadMessages().catch(console.error);
+    }
+  }, [hasKeys]);
+
   async function loadMessages() {
     const res = await ApiClient.get(`/lounge/messages?limit=50`);
-    if (!res?.ok) {
+    // Backward compatibility: check both 'success' (new) and 'ok' (old) fields
+    const isSuccess = res?.success || res?.ok;
+    if (!isSuccess) {
       toastApiError(res?.error || 'Failed to load lounge messages');
       return;
     }
@@ -227,10 +270,13 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
       const res = await ApiClient.post('/lounge/messages', {
         ciphertext_b58: bs58.encode(ct),
         nonce_b58: bs58.encode(nonce),
-        sig_b58: bs58.encode(sig)
+        sig_b58: bs58.encode(sig),
+        key_version: latestKeyVersion, // Include key version
       });
 
-      if (!res?.ok) {
+      // Backward compatibility: check both 'success' (new) and 'ok' (old) fields
+      const isSuccess = res?.success || res?.ok;
+      if (!isSuccess) {
         // rollback UI cooldown if server rejected
         setNewMessage(content);
         setCooldownRemaining(0);

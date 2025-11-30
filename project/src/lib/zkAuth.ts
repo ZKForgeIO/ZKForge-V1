@@ -65,7 +65,7 @@ export class ZKAuthService {
       const sig = bs58.decode(proof.signature);
       const msg = encodeUTF8(`${proof.challenge}:${proof.timestamp}`);
       const isValid = nacl.sign.detached.verify(msg, sig, pk);
-      const isRecent = Date.now() - proof.timestamp < 5 * 60 * 1000;
+      const isRecent = Date.now() - proof.timestamp < 60 * 1000;
       return isValid && isRecent;
     } catch {
       return false;
@@ -173,7 +173,7 @@ export class AuthStorage {
   private static readonly SECRET_KEY = 'zk_secret_key';
 
   static saveAuthData(data: StoredAuthData): void {
-    try { localStorage.setItem(this.AUTH_KEY, JSON.stringify(data)); } catch {}
+    try { localStorage.setItem(this.AUTH_KEY, JSON.stringify(data)); } catch { }
   }
   static getAuthData(): StoredAuthData | null {
     try {
@@ -184,11 +184,13 @@ export class AuthStorage {
       return parsed;
     } catch { return null; }
   }
-  static clearAuthData(): void { try {
-    localStorage.removeItem(this.AUTH_KEY); localStorage.removeItem(this.SECRET_KEY);
-  } catch {} }
+  static clearAuthData(): void {
+    try {
+      localStorage.removeItem(this.AUTH_KEY); localStorage.removeItem(this.SECRET_KEY);
+    } catch { }
+  }
   static saveSecretKey(secretKey: string): void {
-    try { localStorage.setItem(this.SECRET_KEY, ZKAuthService.normalizeTo0xHex(secretKey)); } catch {}
+    try { localStorage.setItem(this.SECRET_KEY, ZKAuthService.normalizeTo0xHex(secretKey)); } catch { }
   }
   static getSecretKey(): string | null {
     try { return localStorage.getItem(this.SECRET_KEY); } catch { return null; }

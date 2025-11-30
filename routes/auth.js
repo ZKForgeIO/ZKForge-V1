@@ -159,7 +159,7 @@ router.post('/signin', authLimiter, async (req, res) => {
 
     const profile = await Profile.findOne({ username });
     if (!profile)
-      return res.json({ success: false, error: "Account not found" });
+      return res.json({ success: false, error: "Authentication failed" });
 
     // auto-migrate old Ed25519 key
     await ensureEd25519Key(profile);

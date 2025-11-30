@@ -32,6 +32,14 @@ app.use(cors({
 }));
 app.use(rateLimit({ windowMs: 60 * 1000, max: 100 }));
 app.use(express.json({ limit: '2mb' }));
+
+// Content-Type validation
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && !req.is('application/json')) {
+    return res.status(415).json({ error: 'Unsupported Media Type' });
+  }
+  next();
+});
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 const server = http.createServer(app);
@@ -54,7 +62,7 @@ const io = {
       if (c.readyState === c.OPEN) {
         try {
           c.send(JSON.stringify({ type, payload }));
-        } catch {}
+        } catch { }
       }
     });
   },
@@ -93,7 +101,7 @@ setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try { ws.ping(); } catch {}
+    try { ws.ping(); } catch { }
   });
 }, 30000);
 

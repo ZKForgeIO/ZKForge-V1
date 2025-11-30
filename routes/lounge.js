@@ -48,13 +48,14 @@ function validatePlaintext(plain) {
   const msg = raw.trim();
 
   if (!msg) return { ok: false, reason: 'empty' };
-  if (msg.length > MAX_LEN) return { ok: false, reason: 'too_long' };
-  if (containsLink(msg)) return { ok: false, reason: 'links_forbidden' };
-  if (repeatedCharRegex.test(msg)) return { ok: false, reason: 'spam_repeats' };
-  if (repeatedWordRegex.test(msg)) return { ok: false, reason: 'spam_repeat_words' };
-  if (hasTooManyEmojis(msg)) return { ok: false, reason: 'spam_emojis' };
+  if (!msg) return { success: false, reason: 'empty' };
+  if (msg.length > MAX_LEN) return { success: false, reason: 'too_long' };
+  if (containsLink(msg)) return { success: false, reason: 'links_forbidden' };
+  if (repeatedCharRegex.test(msg)) return { success: false, reason: 'spam_repeats' };
+  if (repeatedWordRegex.test(msg)) return { success: false, reason: 'spam_repeat_words' };
+  if (hasTooManyEmojis(msg)) return { success: false, reason: 'spam_emojis' };
 
-  return { ok: true, msg };
+  return { success: true, msg };
 }
 
 export default function makeLoungeRouter(io) {
@@ -62,13 +63,39 @@ export default function makeLoungeRouter(io) {
 
   // ---- Room key ----
   // ---- Room key ----
-  if (!process.env.LOUNGE_ROOM_KEY_B58) {
-    console.error('FATAL: LOUNGE_ROOM_KEY_B58 not set in environment.');
+  // ---- Room key management ----
+  let KEYS = [];
+  if (process.env.LOUNGE_KEYS_JSON) {
+    try {
+      const parsed = JSON.parse(process.env.LOUNGE_KEYS_JSON);
+      if (Array.isArray(parsed)) {
+        KEYS = parsed.map(k => ({
+          version: k.version,
+          key: bs58.decode(k.key)
+        }));
+      }
+    } catch (e) {
+      console.error('Failed to parse LOUNGE_KEYS_JSON', e);
+    }
+  }
+
+  // Fallback / Legacy support
+  if (KEYS.length === 0 && process.env.LOUNGE_ROOM_KEY_B58) {
+    KEYS.push({
+      version: 1,
+      key: bs58.decode(process.env.LOUNGE_ROOM_KEY_B58)
+    });
+  }
+
+  if (KEYS.length === 0) {
+    console.error('FATAL: No lounge keys found (LOUNGE_KEYS_JSON or LOUNGE_ROOM_KEY_B58).');
     process.exit(1);
   }
-  const ROOM_KEY_B58 = process.env.LOUNGE_ROOM_KEY_B58;
-  console.log('[Lounge] ROOM_KEY_B58 loaded');
-  const ROOM_KEY = bs58.decode(ROOM_KEY_B58);
+
+  // Sort by version descending (latest first)
+  KEYS.sort((a, b) => b.version - a.version);
+  const LATEST_KEY = KEYS[0];
+  console.log(`[Lounge] Loaded ${KEYS.length} keys. Latest version: ${LATEST_KEY.version}`);
 
   // ----------------------------
   // 🔥 AUTO-MIGRATION HELPERS
@@ -105,36 +132,43 @@ export default function makeLoungeRouter(io) {
       // ensure we have ed25519_public_key (auto-migrate if needed)
       const edKey = await ensureEd25519Key(me);
       if (!edKey) {
-        return res.status(400).json({ ok: false, error: 'no ed25519 key' });
+        return res.status(400).json({ ok: false, error: 'Invalid request' });
       }
 
       let edPub;
       try {
         edPub = bs58.decode(edKey);
       } catch {
-        return res.status(400).json({ ok: false, error: 'bad ed25519 key format' });
+        return res.status(400).json({ ok: false, error: 'Invalid request' });
       }
 
       if (edPub.length !== 32) {
-        return res.status(400).json({ ok: false, error: 'bad ed25519 length' });
+        return res.status(400).json({ ok: false, error: 'Invalid request' });
       }
 
       // Convert Ed25519 -> Curve25519
       const curvePub = ed2curve.convertPublicKey(edPub);
       if (!curvePub) {
-        return res.status(400).json({ ok: false, error: 'curve conversion failed' });
+        return res.status(400).json({ ok: false, error: 'Operation failed' });
       }
 
       const eph = nacl.box.keyPair();
       const nonce = nacl.randomBytes(nacl.box.nonceLength);
-      const sealed = nacl.box(ROOM_KEY, nonce, curvePub, eph.secretKey);
+
+      // Return all active keys, each sealed to the user
+      const keys = KEYS.map(k => {
+        const sealed = nacl.box(k.key, nonce, curvePub, eph.secretKey);
+        return {
+          version: k.version,
+          sealed: bs58.encode(sealed)
+        };
+      });
 
       res.json({
-        ok: true,
+        success: true,
         ephPub: bs58.encode(eph.publicKey),
         nonce: bs58.encode(nonce),
-        sealed: bs58.encode(sealed),
-        version: 2
+        keys
       });
     } catch (e) {
       console.error('[Lounge] key error', e);
@@ -167,6 +201,7 @@ export default function makeLoungeRouter(io) {
         ciphertext_b58: r.ciphertext_b58,
         nonce_b58: r.nonce_b58,
         sig_b58: r.sig_b58 || undefined,
+        key_version: r.key_version || 1,
         sender: map[r.sender_id]
           ? {
             username: map[r.sender_id].username,
@@ -229,15 +264,17 @@ export default function makeLoungeRouter(io) {
         }
       }
 
-      const opened = nacl.secretbox.open(ct, nonce, ROOM_KEY);
+      // Decrypt with the appropriate key version (for validation)
+      // Since we are sending, we use the LATEST key
+      const opened = nacl.secretbox.open(ct, nonce, LATEST_KEY.key);
       if (!opened) {
-        return res.status(400).json({ ok: false, error: 'invalid ciphertext' });
+        return res.status(400).json({ success: false, error: 'invalid ciphertext (check key version?)' });
       }
 
       const plaintext = new TextDecoder().decode(opened);
       const val = validatePlaintext(plaintext);
 
-      if (!val.ok) {
+      if (!val.success) {
         if (val.reason === 'links_forbidden')
           return res.status(400).json({ ok: false, error: 'Links are not allowed' });
 
@@ -257,7 +294,8 @@ export default function makeLoungeRouter(io) {
         sender_id: userId,
         ciphertext_b58,
         nonce_b58,
-        sig_b58: sig_b58 || null
+        sig_b58: sig_b58 || null,
+        key_version: LATEST_KEY.version
       });
 
       const me = await Profile.findById(userId, {
@@ -272,6 +310,7 @@ export default function makeLoungeRouter(io) {
         ciphertext_b58,
         nonce_b58,
         sig_b58: doc.sig_b58 || undefined,
+        key_version: doc.key_version,
         sender: me
           ? {
             username: me.username,

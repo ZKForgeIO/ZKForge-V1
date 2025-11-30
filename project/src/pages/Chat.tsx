@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Send, Menu, LogOut, MessageCircle, X, Settings, Users,
-  Wallet as WalletIcon, Compass, Zap
+  Wallet as WalletIcon, Compass, Zap, KeyRound
 } from 'lucide-react';
 
 import { AuthService, ApiClient, AuthStorage } from '../lib/authService';
@@ -21,21 +21,6 @@ import { Toaster, toast } from 'sonner';
 const is32 = (u: Uint8Array | null | undefined) => !!u && u.length === 32;
 const is24 = (u: Uint8Array | null | undefined) => !!u && u.length === 24;
 
-// ---------- in-memory store for per-conversation symmetric keys ----------
-const convKeyMem = new Map<string, Uint8Array>();
-
-function cacheConvKey(convId: string, key: Uint8Array) {
-  if (!is32(key)) return;
-  convKeyMem.set(convId, key);
-}
-
-function getCachedConvKey(convId: string): Uint8Array | null {
-  return convKeyMem.get(convId) || null;
-}
-
-function dropConvKey(convId: string) {
-  convKeyMem.delete(convId);
-}
 // ------------- toast helpers -------------
 const toastApiError = (msg?: string) =>
   toast.error(msg || 'Something went wrong', { duration: 3500 });
@@ -55,6 +40,7 @@ type EncryptedMsg = {
   ciphertext_b58: string;
   nonce_b58: string;
   sig_b58?: string;
+  key_version?: number; // New field for key version
   sender?: { username: string; profile_picture_url?: string };
 };
 
@@ -65,6 +51,7 @@ type ViewMsg = {
   content: string;
   created_at: string;
   sender?: { username: string; profile_picture_url?: string };
+  is_pending?: boolean; // For optimistic updates
 };
 
 type Conversation = {
@@ -115,8 +102,21 @@ export default function Chat() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   // my ed25519 pair (from expanded 64-byte secret in storage)
-  // my ed25519 pair (from expanded 64-byte secret in storage)
   const edPairRef = useRef<nacl.SignKeyPair | null>(null);
+
+  // ---------- in-memory store for per-conversation symmetric keys ----------
+  // Map<conversationId, Map<version, key>>
+  const convKeysRef = useRef<Map<string, Map<number, Uint8Array>>>(new Map());
+  const [latestKeyVersions, setLatestKeyVersions] = useState<Map<string, number>>(new Map());
+
+  function dropConvKey(convId: string) {
+    convKeysRef.current.delete(convId);
+    setLatestKeyVersions(prev => {
+      const next = new Map(prev);
+      next.delete(convId);
+      return next;
+    });
+  }
 
   async function loadEdPair() {
     if (edPairRef.current) return;
@@ -143,26 +143,27 @@ export default function Chat() {
   }
 
   // --------- convo key fetching/unsealing (mirror Lounge) ----------
-  async function ensureConvKey(conversationId: string): Promise<Uint8Array> {
-    const cached = getCachedConvKey(conversationId);
-    if (cached) {
+  async function ensureConvKey(conversationId: string): Promise<Map<number, Uint8Array>> {
+    const cached = convKeysRef.current.get(conversationId);
+    if (cached && cached.size > 0) {
       return cached;
     }
 
     if (import.meta.env.DEV) console.debug('[DM conv-key] fetch envelope', { conversationId });
     const resp = await ApiClient.get(`/chat/conv-key?conversationId=${encodeURIComponent(conversationId)}`);
-    if (!resp?.ok) {
+    // Backward compatibility: check both 'success' (new) and 'ok' (old) fields
+    const isSuccess = resp?.success || resp?.ok;
+    if (!isSuccess) {
       if (import.meta.env.DEV) console.error('[DM conv-key] server error', resp?.error);
       throw new Error(resp?.error || 'failed to fetch conversation key');
     }
 
-    const { ephPub, nonce, sealed } = resp as { ephPub: string; nonce: string; sealed: string; };
+    const { ephPub, nonce } = resp as { ephPub: string; nonce: string; sealed?: string; keys?: { version: number; sealed: string }[] };
 
-    let theirPubCurve: Uint8Array, n: Uint8Array, sealedBytes: Uint8Array;
+    let theirPubCurve: Uint8Array, n: Uint8Array;
     try {
       theirPubCurve = bs58.decode(ephPub);
       n = bs58.decode(nonce);
-      sealedBytes = bs58.decode(sealed);
     } catch (e) {
       if (import.meta.env.DEV) console.error('[DM conv-key] b58 decode failed', e);
       throw new Error('failed to decode conv key envelope');
@@ -171,16 +172,11 @@ export default function Chat() {
     if (import.meta.env.DEV) console.debug('[DM conv-key] envelope sizes', {
       ephPubLen: theirPubCurve.length,
       nonceLen: n.length,
-      sealedLen: sealedBytes.length
     });
 
     if (!is32(theirPubCurve)) throw new Error('bad eph pub size');
     if (!is24(n)) throw new Error('bad nonce size');
-    if (!sealedBytes || sealedBytes.length < nacl.box.overheadLength) {
-      throw new Error('bad sealed payload');
-    }
 
-    // Derive curve secret EXACTLY like Lounge
     // Derive curve secret EXACTLY like Lounge
     const pwd = sessionStorage.getItem('encryption_password');
     if (!pwd) throw new Error('No encryption password in session');
@@ -194,53 +190,77 @@ export default function Chat() {
       if (import.meta.env.DEV) console.error('[DM conv-key] ed2curve conversion failed');
       throw new Error('failed to derive curve secret');
     }
+    const curveSk = curveSecret as Uint8Array;
 
-    const roomKey = nacl.box.open(sealedBytes, n, theirPubCurve, curveSecret as Uint8Array);
-    if (!roomKey || !is32(roomKey)) {
-      if (import.meta.env.DEV) console.error('[DM conv-key] nacl.box.open failed');
-      throw new Error('failed to unseal conversation key');
+    // New format: resp.keys is array of { version, sealed }
+    // Fallback: resp.sealed (old format, version=1 or 2 implicit)
+    const keysToProcess = resp.keys || (resp.sealed ? [{ version: resp.version || 1, sealed: resp.sealed }] : []);
+
+    const map = new Map<number, Uint8Array>();
+    let maxVer = 0;
+
+    for (const k of keysToProcess) {
+      const sealed = bs58.decode(k.sealed);
+      if (!sealed || sealed.length < nacl.box.overheadLength) {
+        if (import.meta.env.DEV) console.warn(`[DM conv-key] bad sealed payload for version ${k.version}`);
+        continue;
+      }
+      const opened = nacl.box.open(sealed, n, theirPubCurve, curveSk);
+      if (opened && is32(opened)) {
+        map.set(k.version, opened);
+        if (k.version > maxVer) maxVer = k.version;
+      } else {
+        if (import.meta.env.DEV) console.warn(`[DM conv-key] nacl.box.open failed for version ${k.version}`);
+      }
     }
 
-    cacheConvKey(conversationId, roomKey);
-    if (import.meta.env.DEV) console.debug('[DM conv-key] unsealed OK', { conversationId, keyLen: roomKey.length });
-    return roomKey;
+    if (map.size === 0) throw new Error('failed to decrypt any conversation keys');
+
+    convKeysRef.current.set(conversationId, map);
+    setLatestKeyVersions(prev => new Map(prev).set(conversationId, maxVer));
+    if (import.meta.env.DEV) console.debug('[DM conv-key] stored keys', { conversationId, count: map.size, latest: maxVer });
+    return map;
   }
 
   // --------- encrypt/decrypt helpers ----------
-  async function encryptForConversationById(convId: string, plaintext: string): Promise<{
-    nonce_b58: string; ciphertext_b58: string; nonceBytes: Uint8Array; cipherBytes: Uint8Array;
+  async function encryptMessage(conversationId: string, plain: string): Promise<{
+    nonce: Uint8Array; ct: Uint8Array; version: number;
   }> {
-    let key = getCachedConvKey(convId);
-    if (!is32(key)) {
-      // fetch fresh (in-memory cache only)
-      key = await ensureConvKey(convId);
-    }
-    if (!is32(key)) throw new Error('invalid conversation key');
+    const convMap = convKeysRef.current.get(conversationId);
+    if (!convMap) throw new Error('keys not loaded');
+
+    const version = latestKeyVersions.get(conversationId) || 1;
+    const key = convMap.get(version);
+    if (!key) throw new Error('latest key not found');
 
     const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
-    const msg = new TextEncoder().encode(plaintext);
-    const ct = nacl.secretbox(msg, nonce, key as Uint8Array);
-    return {
-      nonce_b58: bs58.encode(nonce),
-      ciphertext_b58: bs58.encode(ct),
-      nonceBytes: nonce,
-      cipherBytes: ct
-    };
+    const msg = new TextEncoder().encode(plain);
+    const ct = nacl.secretbox(msg, nonce, key);
+    return { nonce, ct, version };
   }
 
-  function decryptForConversationById(convId: string, nonce_b58: string, ciphertext_b58: string): string | null {
-    const key = getCachedConvKey(convId);
-    if (!is32(key)) return null;
+  function decryptMessage(conversationId: string, m: EncryptedMsg): string | null {
+    const convMap = convKeysRef.current.get(conversationId);
+    if (!convMap) return null;
+
+    // Default to version 1 if not specified (legacy messages)
+    const version = m.key_version || 1;
+    const key = convMap.get(version);
+
+    // If we don't have the key for this version, we might need to re-fetch keys
+    // But for now, just return null (will trigger re-fetch if we handle it, or just fail)
+    if (!key) return null;
+
     let nonce: Uint8Array, ct: Uint8Array;
     try {
-      nonce = bs58.decode(nonce_b58);
-      ct = bs58.decode(ciphertext_b58);
+      nonce = bs58.decode(m.nonce_b58);
+      ct = bs58.decode(m.ciphertext_b58);
     } catch (e) {
       if (import.meta.env.DEV) console.warn('[DM decrypt] base58 decode error', e);
       return null;
     }
     if (!is24(nonce)) return null;
-    const opened = nacl.secretbox.open(ct, nonce, key as Uint8Array);
+    const opened = nacl.secretbox.open(ct, nonce, key);
     if (!opened) {
       if (import.meta.env.DEV) console.warn('[DM decrypt] secretbox.open failed');
       return null;
@@ -284,7 +304,7 @@ export default function Chat() {
           await ensureConvKey(m.conversation_id).catch((e) => {
             if (import.meta.env.DEV) console.warn('[WS message:new] ensureConvKey failed (will retry on open)', e);
           });
-          const text = decryptForConversationById(m.conversation_id, m.nonce_b58, m.ciphertext_b58);
+          const text = decryptMessage(m.conversation_id, m);
           if (!text) return;
 
           if (m.conversation_id === selectedConversation) {
@@ -325,7 +345,8 @@ export default function Chat() {
   // Load conversations; previews decrypt lazily via cached keys only
   async function loadConversations() {
     const res = await ApiClient.get('/chat/conversations');
-    if (!res?.ok) return;
+    const isSuccess = res?.success || res?.ok;
+    if (!isSuccess) return;
     const list: Conversation[] = res.conversations || [];
     list.sort((a, b) =>
       new Date(b.last_message?.created_at || b.updated_at).getTime() -
@@ -338,7 +359,7 @@ export default function Chat() {
   function decryptedPreview(conv: Conversation): string {
     try {
       if (!conv.last_message) return 'No messages yet';
-      const t = decryptForConversationById(conv.id, conv.last_message.nonce_b58, conv.last_message.ciphertext_b58);
+      const t = decryptMessage(conv.id, conv.last_message);
       return t || 'Encrypted message';
     } catch (e) {
       if (import.meta.env.DEV) console.warn('[DM preview] decrypt failed', e);
@@ -374,11 +395,12 @@ export default function Chat() {
         await ensureConvKey(selectedConversation);
 
         const res = await ApiClient.get(`/chat/messages?conversationId=${selectedConversation}`);
-        if (!res?.ok) return;
+        const isSuccess = res?.success || res?.ok;
+        if (!isSuccess) return;
         const enc: EncryptedMsg[] = res.messages || [];
         const out: ViewMsg[] = [];
         for (const m of enc) {
-          const text = decryptForConversationById(selectedConversation, m.nonce_b58, m.ciphertext_b58);
+          const text = decryptMessage(selectedConversation, m);
           if (!text) continue;
           out.push({
             id: m.id,
@@ -404,12 +426,14 @@ export default function Chat() {
   useEffect(() => { searchQuery.trim() ? searchUsers() : setSearchResults([]); }, [searchQuery]);
   async function searchUsers() {
     const res = await ApiClient.get(`/profiles/search?q=${encodeURIComponent(searchQuery)}`);
-    if (res?.ok) setSearchResults(res.results);
+    const isSuccess = res?.success || res?.ok;
+    if (isSuccess) setSearchResults(res.results);
   }
 
   async function startConversation(otherUserId: string) {
     const res = await ApiClient.post('/chat/conversations', { otherUserId });
-    if (res?.ok) {
+    const isSuccess = res?.success || res?.ok;
+    if (isSuccess) {
       const convId = res.conversation._id || res.conversation.id;
       setSelectedConversation(convId);
       setPendingDmUserId(null);
@@ -427,10 +451,13 @@ export default function Chat() {
     if (!text) return;
 
     let conversationId = selectedConversation;
+    const userId = user?.id;
+    if (!userId) return;
 
     if (pendingDmUserId && !selectedConversation) {
       const res = await ApiClient.post('/chat/conversations', { otherUserId: pendingDmUserId });
-      if (!res?.ok) return;
+      const isSuccess = res?.success || res?.ok;
+      if (!isSuccess) return;
       conversationId = res.conversation._id || res.conversation.id;
       setSelectedConversation(conversationId);
       setPendingDmUserId(null);
@@ -441,23 +468,36 @@ export default function Chat() {
     if (!conversationId) return;
 
     try {
-      const { nonce_b58, ciphertext_b58, nonceBytes, cipherBytes } =
-        await encryptForConversationById(conversationId, text);
+      const { nonce, ct, version } = await encryptMessage(conversationId, text);
+      const sig = signNonceCipher(nonce, ct);
+      const sig_b58 = bs58.encode(sig);
 
-      const sigBytes = signNonceCipher(nonceBytes, cipherBytes);
-      const sig_b58 = bs58.encode(sigBytes);
-
+      // Optimistic update
+      const tempId = 'temp-' + Date.now();
+      const tempMsg: ViewMsg = {
+        id: tempId,
+        conversation_id: conversationId,
+        content: text,
+        sender_id: userId,
+        created_at: new Date().toISOString(),
+        is_pending: true
+      };
+      setMessages(prev => [...prev, tempMsg]);
       setNewMessage('');
+
       const r = await ApiClient.post('/chat/messages', {
         conversationId,
-        ciphertext_b58,
-        nonce_b58,
-        sig_b58
+        ciphertext_b58: bs58.encode(ct),
+        nonce_b58: bs58.encode(nonce),
+        sig_b58,
+        key_version: version
       });
 
-      if (!r?.ok) {
+      const isSuccess = r?.success || r?.ok;
+      if (!isSuccess) {
         setNewMessage(text); // restore
         toastApiError(r?.error || 'Failed to send message');
+        setMessages(prev => prev.filter(msg => msg.id !== tempId)); // Remove optimistic message
         return;
       }
 
@@ -526,11 +566,12 @@ export default function Chat() {
           body: form
         });
         const jr = await r.json();
-        if (!jr?.ok) throw new Error('Upload failed');
+        if (!jr?.success) throw new Error('Upload failed');
         url = jr.url;
       }
       const res = await ApiClient.patch('/profiles', { username: settingsUsername, profile_picture_url: url || null });
-      if (!res?.ok) throw new Error(res?.error || 'Failed to update profile');
+      const isSuccess = res?.success || res?.ok;
+      if (!isSuccess) throw new Error(res?.error || 'Failed to update profile');
       setProfile({ ...profile!, username: settingsUsername, profile_picture_url: url || null });
       setSettingsSuccess('Profile updated successfully!');
       setTimeout(() => { setShowSettings(false); setSelectedFile(null); }, 1200);
@@ -662,6 +703,35 @@ export default function Chat() {
                 <Settings className="w-5 h-5 group-hover:scale-110 transition-transform" />
                 <span className="font-medium">Profile Settings</span>
               </button>
+              <div className="flex items-center gap-2 p-4 border-b border-[#2a2a2a]">
+                <button
+                  onClick={async () => {
+                    if (!selectedConversation) {
+                      toastWarn('Please select a conversation first.');
+                      return;
+                    }
+                    if (!confirm('Rotate encryption key for this conversation? This will generate a new key and re-encrypt existing messages for future use. Old messages will still be decryptable with their original keys.')) return;
+                    try {
+                      const res = await ApiClient.post('/chat/rotate-key', { conversationId: selectedConversation });
+                      const isSuccess = res?.success || res?.ok;
+                      if (isSuccess) {
+                        toast.success(`Key rotated to v${res.version}`);
+                        // Re-fetch keys for the selected conversation
+                        await ensureConvKey(selectedConversation);
+                      } else {
+                        toast.error(res?.error || 'Rotation failed');
+                      }
+                    } catch (e: any) {
+                      toast.error(e.message || 'An unexpected error occurred during key rotation.');
+                    }
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 p-2 hover:bg-[#2a2a2a] rounded-lg transition-colors text-gray-400 hover:text-[#17ff9a]"
+                  title="Rotate Encryption Key"
+                >
+                  <KeyRound className="w-5 h-5" />
+                  <span className="font-medium text-sm">Rotate Key</span>
+                </button>
+              </div>
               <button
                 onClick={handleSignOut}
                 className="w-full flex items-center gap-3 p-4 text-red-400 hover:bg-[#252525] transition-all group"

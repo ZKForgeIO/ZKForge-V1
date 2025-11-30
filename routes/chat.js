@@ -17,23 +17,39 @@ import { newId } from '../lib/ids.js';
 ------------------------------------------------------- */
 const ConvKeySchema = new mongoose.Schema(
   {
-    conversation_id: { type: String, unique: true, index: true },
-    key: { type: Buffer, required: true }
+    conversation_id: { type: String, index: true },
+    version: { type: Number, default: 1 },
+    key: { type: Buffer, required: true },
+    created_at: { type: Date, default: Date.now }
   },
   { versionKey: false }
 );
+ConvKeySchema.index({ conversation_id: 1, version: -1 }, { unique: true });
 
 const ConversationKey =
   mongoose.models.ConversationKey ||
   mongoose.model('ConversationKey', ConvKeySchema);
 
 async function ensureConvKey(conversation_id) {
-  let rec = await ConversationKey.findOne({ conversation_id }).lean();
+  // Try to find ANY key
+  let rec = await ConversationKey.findOne({ conversation_id }).sort({ version: -1 }).lean();
   if (rec) return rec;
 
+  // Create initial key (version 1)
   const key = Buffer.from(nacl.randomBytes(32));
-  await ConversationKey.create({ conversation_id, key });
-  return { conversation_id, key };
+  rec = await ConversationKey.create({ conversation_id, version: 1, key });
+  return rec;
+}
+
+async function getLatestConvKey(conversation_id) {
+  const rec = await ensureConvKey(conversation_id);
+  // ensureConvKey returns the latest one found or created
+  return rec;
+}
+
+async function getAllConvKeys(conversation_id) {
+  await ensureConvKey(conversation_id); // ensure at least one exists
+  return await ConversationKey.find({ conversation_id }).sort({ version: -1 }).lean();
 }
 
 async function userInConversation(userId, conversationId) {
@@ -59,11 +75,18 @@ function toU8(b) {
   throw new Error('invalid key buffer');
 }
 
-async function getConvKeyU8(conversation_id) {
-  const rec = await ensureConvKey(conversation_id);
+async function getConvKeyU8(conversation_id, version) {
+  let rec;
+  if (version) {
+    rec = await ConversationKey.findOne({ conversation_id, version }).lean();
+  } else {
+    rec = await getLatestConvKey(conversation_id);
+  }
+
+  if (!rec) throw new Error('key not found');
   const u8 = toU8(rec.key);
   if (u8.length !== 32) throw new Error('bad conv key size');
-  return u8;
+  return { key: u8, version: rec.version };
 }
 
 /* -------------------------------------------------------
@@ -123,16 +146,16 @@ function validatePlaintext(plain) {
   const raw = stripZeroWidth(plain || '');
   const msg = raw.trim();
 
-  if (!msg) return { ok: false, reason: 'empty' };
-  if (msg.length > MAX_LEN) return { ok: false, reason: 'too_long' };
-  if (containsLink(msg)) return { ok: false, reason: 'links_forbidden' };
+  if (!msg) return { success: false, reason: 'empty' };
+  if (msg.length > MAX_LEN) return { success: false, reason: 'too_long' };
+  if (containsLink(msg)) return { success: false, reason: 'links_forbidden' };
   if (repeatedCharRegex.test(msg))
-    return { ok: false, reason: 'spam_repeats' };
+    return { success: false, reason: 'spam_repeats' };
   if (repeatedWordRegex.test(msg))
-    return { ok: false, reason: 'spam_repeat_words' };
-  if (hasTooManyEmojis(msg)) return { ok: false, reason: 'spam_emojis' };
+    return { success: false, reason: 'spam_repeat_words' };
+  if (hasTooManyEmojis(msg)) return { success: false, reason: 'spam_emojis' };
 
-  return { ok: true, msg };
+  return { success: true, msg };
 }
 
 /* -------------------------------------------------------
@@ -151,42 +174,52 @@ export default function chatRouter(io) {
       const conversationId = String(req.query.conversationId || '');
 
       if (!conversationId)
-        return res.status(400).json({ ok: false, error: 'conversationId required' });
+        return res.status(400).json({ success: false, error: 'conversationId required' });
 
       if (!(await userInConversation(userId, conversationId)))
-        return res.status(403).json({ ok: false, error: 'forbidden' });
+        return res.status(403).json({ success: false, error: 'forbidden' });
 
-      const roomKeyU8 = await getConvKeyU8(conversationId);
-
+      // Get user's Ed25519 public key
       const me = await Profile.findById(userId).lean();
       const edKey = await ensureEd25519(me);
-      if (!edKey) return res.status(400).json({ ok: false, error: 'No Ed25519 key' });
+      if (!edKey) return res.status(400).json({ success: false, error: 'Invalid request' });
 
       let edPub;
       try {
         edPub = bs58.decode(edKey);
       } catch {
-        return res.status(400).json({ ok: false, error: 'Invalid Ed25519 key format' });
+        return res.status(400).json({ success: false, error: 'Invalid request' });
       }
 
       const curvePub = ed2curve.convertPublicKey(edPub);
       if (!curvePub)
-        return res.status(400).json({ ok: false, error: 'Curve25519 conversion failed' });
+        return res.status(400).json({ success: false, error: 'Operation failed' });
 
+      // Generate ephemeral keypair for this response
       const eph = nacl.box.keyPair();
       const nonce = nacl.randomBytes(nacl.box.nonceLength);
-      const sealed = nacl.box(roomKeyU8, nonce, curvePub, eph.secretKey);
+
+      // Get all key versions and seal each one
+      const allKeys = await getAllConvKeys(conversationId);
+
+      const keys = allKeys.map(k => {
+        const kU8 = toU8(k.key);
+        const sealed = nacl.box(kU8, nonce, curvePub, eph.secretKey);
+        return {
+          version: k.version,
+          sealed: bs58.encode(sealed)
+        };
+      });
 
       return res.json({
-        ok: true,
-        version: 2,
+        success: true,
         ephPub: bs58.encode(eph.publicKey),
         nonce: bs58.encode(nonce),
-        sealed: bs58.encode(sealed)
+        keys
       });
     } catch (e) {
       console.error('[chat] conv-key error', e);
-      return res.status(500).json({ ok: false, error: 'failed' });
+      return res.status(500).json({ success: false, error: 'failed' });
     }
   });
 
@@ -247,7 +280,8 @@ export default function chatRouter(io) {
               created_at: last[0].created_at,
               ciphertext_b58: last[0].ciphertext_b58,
               nonce_b58: last[0].nonce_b58,
-              sig_b58: last[0].sig_b58
+              sig_b58: last[0].sig_b58,
+              key_version: last[0].key_version || 1
             }
             : undefined,
           other_user
@@ -278,7 +312,7 @@ export default function chatRouter(io) {
       --------------- */
       if (!conversationId || !ciphertext_b58 || !nonce_b58)
         return res.status(400).json({
-          ok: false,
+          success: false,
           error: 'conversationId, ciphertext_b58, nonce_b58 required'
         });
 
@@ -287,7 +321,7 @@ export default function chatRouter(io) {
       -------------------------------------- */
       if (!sig_b58) {
         return res.status(400).json({
-          ok: false,
+          success: false,
           error: 'Signature required'
         });
       }
@@ -324,8 +358,8 @@ export default function chatRouter(io) {
       const edKey = await ensureEd25519(profile);
       if (!edKey) {
         return res.status(400).json({
-          ok: false,
-          error: 'Missing Ed25519 public key'
+          success: false,
+          error: 'Invalid request'
         });
       }
 
@@ -335,8 +369,8 @@ export default function chatRouter(io) {
         if (edPub.length !== 32) throw new Error();
       } catch {
         return res.status(400).json({
-          ok: false,
-          error: 'Invalid Ed25519 public key'
+          success: false,
+          error: 'Invalid request'
         });
       }
 
@@ -353,15 +387,16 @@ export default function chatRouter(io) {
       /* ----------------------------------------------
          Decrypt for policy validation only
       ---------------------------------------------- */
-      const key = await getConvKeyU8(conversationId);
+      // Use the latest key for new messages
+      const { key, version } = await getConvKeyU8(conversationId);
       const opened = nacl.secretbox.open(ct, nonce, key);
       if (!opened)
-        return res.status(400).json({ ok: false, error: 'Invalid ciphertext' });
+        return res.status(400).json({ success: false, error: 'Invalid ciphertext' });
 
       const plaintext = new TextDecoder().decode(opened);
       const val = validatePlaintext(plaintext);
 
-      if (!val.ok)
+      if (!val.success)
         return res
           .status(400)
           .json({ ok: false, error: 'Message rejected: ' + val.reason });
@@ -431,7 +466,8 @@ export default function chatRouter(io) {
         sender_id: meId,
         ciphertext_b58,
         nonce_b58,
-        sig_b58
+        sig_b58,
+        key_version: version
       });
 
       await Conversation.findByIdAndUpdate(conversationId, {
@@ -451,6 +487,7 @@ export default function chatRouter(io) {
         ciphertext_b58,
         nonce_b58,
         sig_b58,
+        key_version: doc.key_version,
         sender: senderProfile
           ? {
             username: senderProfile.username,
@@ -475,6 +512,52 @@ export default function chatRouter(io) {
     } catch (e) {
       console.error('[chat] send error', e);
       return res.status(500).json({ ok: false, error: 'Internal error' });
+    }
+  });
+
+  /* ----------------------------------------------
+     POST /chat/rotate-key
+     Generates a new key version for the conversation
+  ---------------------------------------------- */
+  router.post('/rotate-key', authMiddleware, async (req, res) => {
+    try {
+      const userId = req.userId;
+      const { conversationId } = req.body;
+
+      if (!conversationId)
+        return res.status(400).json({ success: false, error: 'conversationId required' });
+
+      if (!(await userInConversation(userId, conversationId)))
+        return res.status(403).json({ success: false, error: 'forbidden' });
+
+      // Get latest version
+      const latest = await getLatestConvKey(conversationId);
+      const newVersion = (latest?.version || 0) + 1;
+
+      const newKey = Buffer.from(nacl.randomBytes(32));
+      await ConversationKey.create({
+        conversation_id: conversationId,
+        version: newVersion,
+        key: newKey
+      });
+
+      console.log(`[chat] Rotated key for ${conversationId} to v${newVersion}`);
+
+      // Notify participants about the new key availability
+      // (Clients should re-fetch keys when they see a message with unknown version, 
+      // but we can also push an event)
+      const parts = await ConversationParticipant.find({
+        conversation_id: conversationId
+      }).lean();
+
+      for (const p of parts) {
+        io.to(p.user_id).emit('conversation:key_rotated', { conversationId, version: newVersion });
+      }
+
+      return res.json({ success: true, version: newVersion });
+    } catch (e) {
+      console.error('[chat] rotate-key error', e);
+      return res.status(500).json({ success: false, error: 'failed' });
     }
   });
 

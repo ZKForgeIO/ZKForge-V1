@@ -182,7 +182,7 @@ export class AuthService {
         body: JSON.stringify(updates)
       });
       const res = await r.json();
-      return !!res.ok;
+      return !!res.success;
     } catch { return false; }
   }
 }
