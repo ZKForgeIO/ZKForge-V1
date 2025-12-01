@@ -1,6 +1,12 @@
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import { sha256 } from '@noble/hashes/sha2.js';
+import {
+  createField,
+  buildAuthTrace,
+  generateAuthProof,
+  fieldElementToBytes
+} from '@zkforge/zkstark';
 
 function encodeUTF8(str: string): Uint8Array { return new TextEncoder().encode(str); }
 function decodeUTF8(bytes: Uint8Array): string { return new TextDecoder().decode(bytes); }
@@ -157,6 +163,55 @@ export class ZKAuthService {
 
   static unformatSecretKey(formattedKey: string): string {
     return formattedKey.replace(/\s+/g, '');
+  }
+
+  /**
+   * Generate a zkSTARK auth proof on the client side.
+   * This prevents sending the secret key to the backend.
+   */
+  static generateStarkAuthProof(secretKey: string, steps: number, queries: number): any {
+    const sk64 = this.parseSecretKey(secretKey);
+    const secretHex = '0x' + this.bytesToHex(sk64);
+
+    // Convert secret to field element
+    const secretFe = createField(BigInt(secretHex));
+    const params = { steps, queries };
+    const witness = { secret: secretFe };
+
+    // Build trace to compute finalHash for statement
+    const trace = buildAuthTrace(witness, params);
+    const finalHash = trace[steps - 1];
+    const statement = { steps, finalHash };
+
+    // Generate proof with correct argument order: (statement, witness, params)
+    const proof = generateAuthProof(statement, witness, params);
+
+    // Serialize proof for transport (convert Uint8Array to hex strings)
+    return {
+      root: '0x' + this.bytesToHex(proof.root),
+      indices: proof.indices,
+      openings: proof.openings.map(o => ({
+        index: o.index,
+        current: '0x' + this.bytesToHex(fieldElementToBytes(o.current)),
+        next: '0x' + this.bytesToHex(fieldElementToBytes(o.next)),
+        proofCurrent: {
+          leaf: '0x' + this.bytesToHex(o.proofCurrent.leaf),
+          proof: o.proofCurrent.proof.map(p => ({
+            hash: '0x' + this.bytesToHex(p.hash),
+            position: p.position
+          })),
+          root: '0x' + this.bytesToHex(o.proofCurrent.root)
+        },
+        proofNext: {
+          leaf: '0x' + this.bytesToHex(o.proofNext.leaf),
+          proof: o.proofNext.proof.map(p => ({
+            hash: '0x' + this.bytesToHex(p.hash),
+            position: p.position
+          })),
+          root: '0x' + this.bytesToHex(o.proofNext.root)
+        }
+      }))
+    };
   }
 }
 

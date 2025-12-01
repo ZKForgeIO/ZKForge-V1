@@ -145,15 +145,36 @@ router.post('/signup', authLimiter, async (req, res) => {
   }
 });
 
-// --- SIGNIN (zkSTARK-based)
+// --- PRE-SIGNIN (Get ZK Params) ---
+router.post('/pre-signin', authLimiter, async (req, res) => {
+  try {
+    const { username } = req.body || {};
+    if (!username) return res.status(400).json({ success: false, error: 'username required' });
+
+    const profile = await Profile.findOne({ username }).lean();
+    if (!profile) return res.json({ success: false, error: 'User not found' });
+
+    res.json({
+      success: true,
+      zkPublicKey: profile.zk_public_key,
+      zkAuthSteps: profile.zk_auth_steps || DEFAULT_STEPS,
+      zkAuthQueries: profile.zk_auth_queries || DEFAULT_QUERIES
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ success: false, error: 'Failed to fetch auth params' });
+  }
+});
+
+// --- SIGNIN (zkSTARK-based) ---
 router.post('/signin', authLimiter, async (req, res) => {
   try {
-    const { username, zkSecretKey } = req.body || {};
+    const { username, proof } = req.body || {};
 
-    if (!username || !zkSecretKey) {
+    if (!username || !proof) {
       return res.status(400).json({
         success: false,
-        error: "username and zkSecretKey are required"
+        error: "username and proof are required"
       });
     }
 
@@ -164,19 +185,23 @@ router.post('/signin', authLimiter, async (req, res) => {
     // auto-migrate old Ed25519 key
     await ensureEd25519Key(profile);
 
-    // convert user-entered secret key → 64-byte expanded secret
-    const normalized = normalizeTo0xHex(zkSecretKey);
+    // Verify the proof against stored commitment
+    try {
+      const isValid = verifyStarkAuthProof(
+        profile.zk_public_key,
+        proof,
+        {
+          steps: profile.zk_auth_steps || DEFAULT_STEPS,
+          queries: profile.zk_auth_queries || DEFAULT_QUERIES
+        }
+      );
 
-    // recompute the final hash (public commitment) using stored params
-    const { finalHashHex } = computeStarkAuthPublic(
-      normalized,
-      profile.zk_auth_steps || DEFAULT_STEPS,
-      profile.zk_auth_queries || DEFAULT_QUERIES
-    );
-
-    // compare against stored commitment
-    if (finalHashHex !== profile.zk_public_key) {
-      return res.json({ success: false, error: "Authentication failed" });
+      if (!isValid) {
+        return res.json({ success: false, error: "Invalid ZK Proof" });
+      }
+    } catch (e) {
+      console.error('Proof verification error:', e);
+      return res.json({ success: false, error: "Invalid ZK Proof" });
     }
 
     profile.is_online = true;

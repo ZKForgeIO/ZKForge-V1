@@ -114,10 +114,25 @@ export class AuthService {
 
   static async signIn(username: string, zkSecretKey: string, password: string): Promise<AuthResult> {
     try {
+      // 1. Get auth params (steps, queries) from backend
+      const preRes = await fetch(`${API_BASE}/auth/pre-signin`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username })
+      });
+      const preData = await preRes.json();
+      if (!preData.success) return { success: false, error: preData.error || 'User not found' };
+
+      const { zkAuthSteps, zkAuthQueries } = preData;
+
+      // 2. Generate ZK proof locally
+      const proof = ZKAuthService.generateStarkAuthProof(zkSecretKey, zkAuthSteps, zkAuthQueries);
+
+      // 3. Send proof to backend
       const r = await fetch(`${API_BASE}/auth/signin`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username, zkSecretKey })
+        body: JSON.stringify({ username, proof })
       });
       const res = await r.json();
       if (!res.success) return { success: false, error: res.error || 'Failed to sign in' };
