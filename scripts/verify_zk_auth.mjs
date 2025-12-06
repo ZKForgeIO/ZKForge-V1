@@ -87,7 +87,7 @@ async function runTest() {
         const { zkSecretKey } = signupRes.body;
         console.log('Received Secret Key:', zkSecretKey);
 
-        // 2. Pre-Signin (Get Params)
+        // 2. Pre-Signin (Get Params + Challenge)
         console.log('\n--- Step 1: Pre-Signin ---');
         const preRes = await request(app)
             .post('/auth/pre-signin')
@@ -97,13 +97,15 @@ async function runTest() {
             throw new Error(`Pre-signin failed: ${preRes.body.error}`);
         }
         console.log('✅ Pre-signin successful');
-        const { zkAuthSteps, zkAuthQueries } = preRes.body;
+        const { zkAuthSteps, zkAuthQueries, challenge } = preRes.body;
         console.log(`Params: steps=${zkAuthSteps}, queries=${zkAuthQueries}`);
+        console.log(`Challenge: ${challenge}`);
 
-        // 3. Generate Proof (Client Side Simulation)
+        // 3. Generate Proof (Client Side Simulation - NOW WITH CHALLENGE)
         console.log('\n--- Step 2: Generate Proof (Client Side) ---');
         const proof = generateStarkAuthProof(zkSecretKey, zkAuthSteps, zkAuthQueries);
-        console.log('✅ Proof generated');
+        proof.challenge = challenge; // Add challenge to proof for replay protection
+        console.log('✅ Proof generated with challenge');
 
         // 4. Signin with Proof
         console.log('\n--- Step 3: Signin with Proof ---');
@@ -117,9 +119,24 @@ async function runTest() {
         console.log('✅ Signin successful');
         console.log('Session Token:', signinRes.body.sessionToken);
 
-        // 5. Test Invalid Proof
-        console.log('\n--- Step 4: Test Invalid Proof ---');
-        const invalidProof = { ...proof, root: '0xdeadbeef' }; // Tamper with proof
+        // 5. Test Replay Attack (same proof should fail - Issue #2/#4)
+        console.log('\n--- Step 4: Test Replay Attack Protection ---');
+        const replayRes = await request(app)
+            .post('/auth/signin')
+            .send({ username, proof }); // Same proof again
+
+        if (replayRes.body.success) {
+            throw new Error('❌ Replay attack succeeded - this is a security vulnerability!');
+        }
+        console.log('✅ Replay attack blocked:', replayRes.body.error);
+
+        // 6. Test Invalid Proof
+        console.log('\n--- Step 5: Test Invalid Proof ---');
+        // First get a fresh challenge
+        const preRes2 = await request(app)
+            .post('/auth/pre-signin')
+            .send({ username });
+        const invalidProof = { ...proof, root: '0xdeadbeef', challenge: preRes2.body.challenge };
         const failRes = await request(app)
             .post('/auth/signin')
             .send({ username, proof: invalidProof });
@@ -128,6 +145,8 @@ async function runTest() {
             throw new Error('Signin should have failed with invalid proof');
         }
         console.log('✅ Signin failed as expected with invalid proof');
+
+        console.log('\n=== ALL TESTS PASSED ===');
 
     } catch (e) {
         console.error('❌ Test Failed:', e);

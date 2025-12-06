@@ -72,7 +72,7 @@ class WSBus {
 
   emit(event: string, payload: any) {
     this.handlers.get(event)?.forEach(h => {
-      try { h(payload); } catch {}
+      try { h(payload); } catch { }
     });
   }
 
@@ -116,7 +116,7 @@ class WSBus {
       try {
         const obj = JSON.parse(raw);
         if (obj.id === this.leaderId) localStorage.removeItem(LEADER_KEY);
-      } catch {}
+      } catch { }
     }
   }
 
@@ -176,8 +176,8 @@ class WSBus {
 
     try {
       this.cleanupWS();
-      const url = `${WS_BASE}?token=${encodeURIComponent(token)}`;
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(WS_BASE, token);
+
       this.ws = ws;
 
       ws.onopen = () => {
@@ -197,8 +197,8 @@ class WSBus {
       };
 
       ws.onclose = () => this.scheduleReconnect();
-      ws.onerror  = () => {
-        try { ws.close(); } catch {}
+      ws.onerror = () => {
+        try { ws.close(); } catch { }
       };
     } catch {
       this.scheduleReconnect();
@@ -208,7 +208,7 @@ class WSBus {
   private scheduleReconnect() {
     if (!this.isLeader) return;
     if (this.reconnectTimer) return;
-    const delay = this.backoff + Math.floor(Math.random()*400);
+    const delay = this.backoff + Math.floor(Math.random() * 400);
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX);
@@ -219,7 +219,7 @@ class WSBus {
   private cleanupWS() {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.ws) {
-      try { this.ws.onopen = this.ws.onclose = this.ws.onmessage = this.ws.onerror = null!; this.ws.close(); } catch {}
+      try { this.ws.onopen = this.ws.onclose = this.ws.onmessage = this.ws.onerror = null!; this.ws.close(); } catch { }
       this.ws = null;
     }
   }

@@ -114,7 +114,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
     roomKeysRef.current = map;
     setLatestKeyVersion(maxVer);
     setHasKeys(true);
-    console.log(`[Lounge] Loaded ${map.size} keys, latest=${maxVer}`);
+    if (import.meta.env.DEV) console.log(`[Lounge] Loaded ${map.size} keys, latest=${maxVer}`);
   }
 
   function decryptMessage(m: LoungeMessageEncrypted): string | null {
@@ -122,7 +122,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
     const key = roomKeysRef.current.get(version);
 
     if (!key) {
-      console.warn(`[Lounge] No key found for version ${version}`);
+      if (import.meta.env.DEV) console.warn(`[Lounge] No key found for version ${version}`);
       return null;
     }
 
@@ -130,7 +130,7 @@ export default function Lounge({ userId, profile, onUserClick }: LoungeProps) {
     const nonce = bs58.decode(m.nonce_b58);
     const opened = nacl.secretbox.open(ct, nonce, key);
     if (!opened) {
-      console.warn(`[Lounge] Failed to decrypt message ${m.id} with key version ${version}`);
+      if (import.meta.env.DEV) console.warn(`[Lounge] Failed to decrypt message ${m.id} with key version ${version}`);
       return null;
     }
     return new TextDecoder().decode(opened);

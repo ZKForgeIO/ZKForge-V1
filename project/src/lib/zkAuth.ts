@@ -168,8 +168,12 @@ export class ZKAuthService {
   /**
    * Generate a zkSTARK auth proof on the client side.
    * This prevents sending the secret key to the backend.
+   * @param secretKey - The secret key (0x hex or base58)
+   * @param steps - Number of hash chain steps
+   * @param queries - Number of random queries
+   * @param challenge - Optional server-issued challenge nonce for replay protection
    */
-  static generateStarkAuthProof(secretKey: string, steps: number, queries: number): any {
+  static generateStarkAuthProof(secretKey: string, steps: number, queries: number, challenge?: string): any {
     const sk64 = this.parseSecretKey(secretKey);
     const secretHex = '0x' + this.bytesToHex(sk64);
 
@@ -190,6 +194,8 @@ export class ZKAuthService {
     return {
       root: '0x' + this.bytesToHex(proof.root),
       indices: proof.indices,
+      // Include challenge nonce for replay protection (Issue #2/#4)
+      challenge: challenge || undefined,
       openings: proof.openings.map(o => ({
         index: o.index,
         current: '0x' + this.bytesToHex(fieldElementToBytes(o.current)),

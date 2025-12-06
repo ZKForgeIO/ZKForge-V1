@@ -14,6 +14,9 @@ import {
   generateChallenge,
   computeStarkAuthPublic,
   verifyStarkAuthProof,
+  verifyStarkAuthProofWithChallenge,
+  generateAuthChallenge,
+  validateEd25519PublicKey,
   DEFAULT_STEPS,
   DEFAULT_QUERIES
 } from '../lib/zkAuth.js';
@@ -145,20 +148,28 @@ router.post('/signup', authLimiter, async (req, res) => {
   }
 });
 
-// --- PRE-SIGNIN (Get ZK Params) ---
+// --- PRE-SIGNIN (Get ZK Params + Challenge) ---
 router.post('/pre-signin', authLimiter, async (req, res) => {
   try {
     const { username } = req.body || {};
     if (!username) return res.status(400).json({ success: false, error: 'username required' });
 
-    const profile = await Profile.findOne({ username }).lean();
+    const profile = await Profile.findOne({ username });
     if (!profile) return res.json({ success: false, error: 'User not found' });
+
+    // Generate and store fresh challenge nonce (Issue #2/#4 - Replay Protection)
+    const challenge = generateAuthChallenge();
+    profile.last_challenge_nonce = challenge.nonce;
+    profile.last_challenge_time = new Date(challenge.timestamp);
+    await profile.save();
 
     res.json({
       success: true,
       zkPublicKey: profile.zk_public_key,
       zkAuthSteps: profile.zk_auth_steps || DEFAULT_STEPS,
-      zkAuthQueries: profile.zk_auth_queries || DEFAULT_QUERIES
+      zkAuthQueries: profile.zk_auth_queries || DEFAULT_QUERIES,
+      // Send challenge to client - client must include this in proof
+      challenge: challenge.nonce
     });
   } catch (e) {
     console.error(e);
@@ -166,7 +177,7 @@ router.post('/pre-signin', authLimiter, async (req, res) => {
   }
 });
 
-// --- SIGNIN (zkSTARK-based) ---
+// --- SIGNIN (zkSTARK-based with challenge validation) ---
 router.post('/signin', authLimiter, async (req, res) => {
   try {
     const { username, proof } = req.body || {};
@@ -185,20 +196,31 @@ router.post('/signin', authLimiter, async (req, res) => {
     // auto-migrate old Ed25519 key
     await ensureEd25519Key(profile);
 
-    // Verify the proof against stored commitment
+    // Verify the proof with challenge validation (Issue #2/#4 - Replay Protection)
     try {
-      const isValid = verifyStarkAuthProof(
+      const challengeData = {
+        storedNonce: profile.last_challenge_nonce,
+        storedTime: profile.last_challenge_time
+      };
+
+      const result = verifyStarkAuthProofWithChallenge(
         profile.zk_public_key,
         proof,
         {
           steps: profile.zk_auth_steps || DEFAULT_STEPS,
           queries: profile.zk_auth_queries || DEFAULT_QUERIES
-        }
+        },
+        challengeData
       );
 
-      if (!isValid) {
-        return res.json({ success: false, error: "Invalid ZK Proof" });
+      if (!result.valid) {
+        console.log('Auth failed:', result.reason);
+        return res.json({ success: false, error: result.reason || "Invalid ZK Proof" });
       }
+
+      // Invalidate the challenge after successful use (one-time use)
+      profile.last_challenge_nonce = null;
+      profile.last_challenge_time = null;
     } catch (e) {
       console.error('Proof verification error:', e);
       return res.json({ success: false, error: "Invalid ZK Proof" });
